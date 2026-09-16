@@ -5,15 +5,19 @@ documented in Dortania's own guide (github.com/dortania/OpenCore-Post-Install,
 universal/iservices.md) - reproduced here because it's the actual, current
 community-standard checklist, not reinvented:
 
-  1. ROM must be a real network adapter's MAC address (smbios.py handles
-     this automatically now - see its docstring for the fix this drove).
+  1. ROM must be a real network adapter's MAC address. apply_to_efi() below
+     patches this directly into whatever config.plist opcore_simplify.py
+     produced - necessary because OpCore-Simplify's own SMBIOS generator
+     (Scripts/smbios.py) sets ROM to a random MAC by default, the exact
+     same problem this toolkit's own SMBIOS code used to have before this
+     fix, verified by reading its current source: `"ROM": random_mac_address`.
   2. That SAME adapter must be marked "built-in" via a DeviceProperties
      patch, so macOS's `en0` assignment converges on it and its MAC matches
-     ROM. This module does that - see apply_builtin_property().
-  3. A valid, uniquely-generated serial (smbios.py, already handled) -
-     ideally one Apple's Check Coverage page reports as unrecognized rather
-     than already registered to a real device. See generate_candidates() in
-     smbios.py and print_checklist() below for the manual verification step
+     ROM. apply_to_efi() does this too - see apply_builtin_property().
+  3. A valid, uniquely-generated serial - OpCore-Simplify's own SMBIOS step
+     handles generation; ideally pick one Apple's Check Coverage page
+     reports as unrecognized rather than already registered to a real
+     device. See print_checklist() below for the manual verification step
      (deliberately NOT automated - see the note in print_checklist).
   4. Working NVRAM (real or emulated) - iMessage keys live there.
   5. If activation still fails or gets flagged, there's a documented
@@ -32,10 +36,18 @@ Apple ID.
 
 import os
 import plistlib
+import random
 import subprocess
 import sys
 
 import hw_detect
+
+APPLE_OUI_FALLBACK = ('00', '16', 'cb')  # confirmed real Apple OUI, per Dortania's iServices guide
+
+
+def _synthetic_apple_mac():
+    tail = [random.randint(0, 255) for _ in range(3)]
+    return ':'.join(APPLE_OUI_FALLBACK + tuple(f'{b:02x}' for b in tail))
 
 
 def find_builtin_candidate():
@@ -72,16 +84,50 @@ def apply_builtin_property(config, controller):
     return True
 
 
-def print_checklist(identity, controller):
+def apply_to_efi(efi_dest, controller=None):
+    """
+    Patches EFI/OC/config.plist (as produced by opcore_simplify.py) so ROM
+    is a real MAC instead of OpCore-Simplify's own random default, and marks
+    the matching adapter built-in where its PCI path is resolvable. Prints
+    the full checklist either way. Call this right after opcore_simplify.py
+    finishes building.
+    """
+    config_path = os.path.join(efi_dest, 'OC', 'config.plist')
+    if not os.path.isfile(config_path):
+        print(f'No config.plist found at {config_path} - was the EFI actually built?')
+        return
+
+    if controller is None:
+        controller = find_builtin_candidate()
+
+    mac = (controller or {}).get('mac') or _synthetic_apple_mac()
+    rom = bytes.fromhex(mac.replace(':', '').lower())
+    rom_is_real = bool((controller or {}).get('mac'))
+
+    with open(config_path, 'rb') as f:
+        config = plistlib.load(f)
+    generic = config.setdefault('PlatformInfo', {}).setdefault('Generic', {})
+    generic['ROM'] = rom
+    serial = generic.get('SystemSerialNumber', '(not set)')
+    apply_builtin_property(config, controller)
+    with open(config_path, 'wb') as f:
+        plistlib.dump(config, f)
+
+    print(f'Patched {config_path}: ROM -> {mac} ({"real adapter" if rom_is_real else "synthetic Apple-OUI"}), '
+          f'serial {serial} left as OpCore-Simplify generated it.')
+    print_checklist(mac, rom_is_real, controller)
+
+
+def print_checklist(rom_mac, rom_is_real, controller):
     print()
     print('=' * 70)
     print('iMessage/iCloud activation checklist')
     print('=' * 70)
     if controller and controller.get('mac'):
-        source = 'this real adapter\'s' if identity.get('ROM_is_real') else 'a synthetic Apple-OUI'
-        print(f'- ROM is set to {source} MAC: {identity.get("ROM_mac")}')
+        source = 'this real adapter\'s' if rom_is_real else 'a synthetic Apple-OUI'
+        print(f'- ROM is set to {source} MAC: {rom_mac}')
     else:
-        print(f'- ROM is set to a synthetic Apple-OUI MAC: {identity.get("ROM_mac")} (no wired adapter detected)')
+        print(f'- ROM is set to a synthetic Apple-OUI MAC: {rom_mac} (no wired adapter detected)')
     if controller and controller.get('pci_path'):
         print(f'- Marked {controller["name"]} ({controller["pci_path"]}) as built-in in DeviceProperties.')
     elif controller:
