@@ -280,7 +280,8 @@ def register_in_config(config_path, kext_bundle_name):
 
 def apply(efi_dest, workdir, smbios_model='iMac19,1'):
     """
-    efi_dest: the 'EFI' folder produced by opencore_build.build_efi().
+    efi_dest: the 'EFI' folder produced by opcore_simplify.py (copied onto
+    the EFI partition by hackintosh_setup.py).
     On Linux, generates a real port map automatically from sysfs (see
     generate_linux()). On Windows/macOS, hands off to the real USBToolBox
     tool interactively - the better-supported path on those platforms.
@@ -309,6 +310,6 @@ def apply(efi_dest, workdir, smbios_model='iMac19,1'):
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
-        print(f'Usage: {sys.argv[0]} <path to EFI/EFI folder produced by opencore_build.py>')
+        print(f'Usage: {sys.argv[0]} <path to EFI/EFI folder produced by opcore_simplify.py>')
         sys.exit(1)
     apply(sys.argv[1], os.path.join(os.getcwd(), 'usb_work'))

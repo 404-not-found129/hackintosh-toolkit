@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Cross-platform CPU/GPU inventory. Returns plain dicts so gpu_compat.py can
-stay OS-agnostic. Every function degrades to an empty/"unknown" result
+Cross-platform hardware inventory (CPU/GPU/network/storage/etc). Returns
+plain dicts so callers (hardware_report.py, imessage.py, usb_map.py, ...)
+can stay OS-agnostic. Every function degrades to an empty/"unknown" result
 instead of raising, so a missing tool on a stripped-down system never
 crashes the wizard.
 """
@@ -236,7 +237,7 @@ def get_primary_mac():
     """
     Best real MAC address to base the SMBIOS ROM value on - a genuine
     physical Ethernet adapter's MAC, per the community-standard iMessage
-    activation method (see smbios.py). Returns None if no wired controller
+    activation method (see imessage.py). Returns None if no wired controller
     with a readable MAC was found; callers should fall back to a synthetic
     Apple-OUI-prefixed MAC in that case rather than leaving ROM unset.
     """
@@ -304,8 +305,10 @@ def get_bluetooth_controllers():
     """
     Returns a list of {'name', 'vendor_id', 'device_id', 'transport'}.
     vendor_id/device_id are 4-hex-digit USB IDs where known (None for a
-    genuine Apple internal module, which reports over UART/PCIe with no USB
-    VID:PID at all - see bluetooth_compat.classify() for what that means).
+    genuine Apple internal module, which reports over UART with no USB
+    VID:PID at all, vendor_id '004c' being Apple's own - see
+    hardware_report.py's gather_bluetooth(), which skips those entries
+    since they need no USB-style ID reported).
 
     Caveat inherited from the USB-mapping module: on macOS, this only sees
     what the OS has *already* matched to some Bluetooth-aware driver path -

@@ -171,6 +171,11 @@ def main():
     log_path = start_logging()
     print(f'Logging this session to {log_path}')
     banner()
+    # Checked early on purpose: create_partitions() also enforces this, but
+    # not until after the entire OpCore-Simplify session, disk selection,
+    # and download - a non-root run would otherwise burn all of that (often
+    # many minutes) before failing at the very last, most destructive step.
+    partition.require_admin()
     osname = hw_detect.host_os()
     print(f'Host OS: {osname}')
 

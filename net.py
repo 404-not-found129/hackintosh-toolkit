@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small shared HTTP helpers used by opencore_build.py, smbios.py, acpi_patches.py, usb_map.py, cpufriend.py."""
+"""Small shared HTTP helpers used by opcore_simplify.py, usb_map.py, cpufriend.py."""
 
 import json
 import os

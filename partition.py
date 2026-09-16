@@ -151,7 +151,7 @@ def create_partitions(disk_id):
       partition 1: EFI System Partition, FAT32, EFI_SIZE_MIB
       partition 2: rest of the disk, for the macOS BaseSystem image
     Returns (efi_partition_id, target_partition_id) - OS-native identifiers
-    you can pass into write_basesystem.py / opencore_build.py.
+    you can pass into write_basesystem.py / opcore_simplify.py.
     """
     require_admin()
     osname = hw_detect.host_os()

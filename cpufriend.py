@@ -13,9 +13,11 @@ Straight from CPUFriend's own docs, though: "CPUFriend is most likely NOT
 required when not sure whether or not to use it... do not use it for data
 customization until one knows clearly what the power management data really
 is... if nothing is provided, CPUFriend does nothing and the original data is
-used as if this kext is not installed." This is opt-in for a reason - it is
-NOT enabled by default here even on laptops. Pass enable_cpufriend=True to
-opencore_build.build_efi() if you specifically want it staged.
+used as if this kext is not installed." This is opt-in for a reason. Whether
+CPUFriend.kext itself gets staged is now up to what you select in
+OpCore-Simplify's own kext customization menu (option 4) - this module only
+handles the data half, which nothing else can generate ahead of time anyway
+(see below), and works regardless of how CPUFriend.kext got there.
 
 The data half (CPUFriendDataProvider.kext) genuinely cannot be built ahead of
 time, for the same reason ACPI/USB generation can't be templated: the source
@@ -68,7 +70,7 @@ def generate(efi_dest, workdir):
     own stock values. Must run on the actual target machine, already booted
     into macOS with the EFI this toolkit built.
 
-    efi_dest: the 'EFI' folder produced by opencore_build.build_efi().
+    efi_dest: the 'EFI' folder produced by opcore_simplify.py.
     Returns the kext bundle name added, or None on failure (reason printed).
     """
     if hw_detect.host_os() != 'macos':
@@ -77,6 +79,16 @@ def generate(efi_dest, workdir):
             '(it reads /System/Library/Extensions/IOPlatformPluginFamily.kext/... directly). '
             'Boot this drive into macOS first, then run this from there.'
         )
+
+    # CPUFriend.kext presence is no longer guaranteed by this toolkit - it's
+    # whatever was selected in OpCore-Simplify's own kext customization menu -
+    # so check before doing the expensive part (live ACPI read, ResourceConverter)
+    # to produce a CPUFriendDataProvider.kext that would silently do nothing.
+    if not os.path.isdir(os.path.join(efi_dest, 'OC', 'Kexts', 'CPUFriend.kext')):
+        print(f'CPUFriend.kext not found in {efi_dest}/OC/Kexts - add it there first '
+              '(https://github.com/acidanthera/CPUFriend/releases) and register it in '
+              'config.plist, or this generated data will have nothing to attach to.')
+        return None
 
     tool_dir = fetch_tool(workdir)
     if tool_dir not in sys.path:
@@ -165,7 +177,7 @@ def register_in_config(config_path):
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
-        print(f'Usage: {sys.argv[0]} <path to EFI/EFI folder produced by opencore_build.py>')
+        print(f'Usage: {sys.argv[0]} <path to EFI/EFI folder produced by opcore_simplify.py>')
         print('Run this from macOS, already booted with this EFI\'s SMBIOS model.')
         sys.exit(1)
     generate(sys.argv[1], os.path.join(os.getcwd(), 'cpufriend_work'))

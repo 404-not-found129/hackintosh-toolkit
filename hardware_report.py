@@ -91,9 +91,16 @@ def gather_motherboard(prompt_if_unknown=True):
         name = out.strip() or None
 
     if not name and prompt_if_unknown:
-        # macOS has no real DMI data on a Hackintosh (see module docstring) -
-        # this is the one field on this platform only a human can supply.
-        name = input('Motherboard model (e.g. "ASUS ROG STRIX Z390-E GAMING") - macOS cannot read this: ').strip() or 'Unknown'
+        if osname == 'macos':
+            # No real DMI data on a Hackintosh at all (see module docstring) -
+            # this is the one field on this platform only a human can supply.
+            reason = 'macOS cannot read this on a Hackintosh'
+        else:
+            # dmidecode (Linux) / WMI (Windows) normally get this - reaching
+            # here means that lookup itself failed (tool missing, permissions,
+            # etc.), not a platform-wide gap like the macOS case above.
+            reason = 'automatic detection failed on this machine'
+        name = input(f'Motherboard model (e.g. "ASUS ROG STRIX Z390-E GAMING") - {reason}: ').strip() or 'Unknown'
     elif not name:
         name = 'Unknown'
 
