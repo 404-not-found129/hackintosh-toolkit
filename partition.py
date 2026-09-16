@@ -5,15 +5,23 @@ OpenCore) and a second partition (for the macOS BaseSystem image).
 
 THIS IS THE ONE DESTRUCTIVE STEP IN THE WHOLE TOOLKIT. Every function that
 touches a real disk requires the caller to have already gone through
-confirm_and_wipe(), which forces the operator to type back the exact disk
-identifier and the literal word ERASE. There is no "auto-pick the biggest
-disk" anywhere in here on purpose - you must name your target explicitly.
+confirm_and_wipe(). By default that forces the operator to type back the
+exact disk identifier and the literal word ERASE. confirm_and_wipe(auto=True)
+skips the typing (for the one-click flow's "exactly one USB/SD device was
+auto-detected" case - see hackintosh_setup.py's choose_disk()) but still
+prints the disk identifier/size/label and holds for a few seconds so a
+Ctrl+C is still possible before anything is touched - auto-confirm is not
+the same as silent. There is still no "auto-pick the biggest disk"/"auto-
+pick an internal drive" anywhere in here - auto-confirm only ever applies
+to a disk that was independently identified as the sole connected USB/SD
+device, never a disk picked out of a list of several or an internal drive.
 """
 
 import json
 import os
 import subprocess
 import sys
+import time
 
 import hw_detect
 
@@ -129,7 +137,14 @@ def list_removable_disks():
 MIN_RECOMMENDED_GIB = 14  # BaseSystem + EFI + working room; below this, warn but don't block
 
 
-def confirm_and_wipe(disk_id, label, size_gib=None):
+def confirm_and_wipe(disk_id, label, size_gib=None, auto=False):
+    """
+    auto=True skips typing the confirmation back (see module docstring for
+    exactly when this toolkit sets that - only a disk independently proven
+    to be the sole connected USB/SD device). It still prints the same loud
+    warning and holds for a few seconds so Ctrl+C remains a real option
+    right up until the erase actually starts.
+    """
     print()
     print(f'!! ABOUT TO ERASE: {disk_id}  ({label})')
     print('!! Every partition and every file on this disk will be permanently destroyed.')
@@ -137,6 +152,15 @@ def confirm_and_wipe(disk_id, label, size_gib=None):
         print(f'!! This disk is only {size_gib} GiB - {MIN_RECOMMENDED_GIB}+ GiB is recommended for the')
         print('!! BaseSystem image plus working room. It may not fit.')
     print()
+
+    if auto:
+        print(f'Auto-confirming (this was the only USB/SD device connected). '
+              f'Erasing {disk_id} in 5 seconds - Ctrl+C now to abort.')
+        for remaining in (5, 4, 3, 2, 1):
+            print(f'  {remaining}...')
+            time.sleep(1)
+        return
+
     typed = input(f'Type the disk identifier exactly ("{disk_id}") to continue: ')
     if typed.strip() != disk_id:
         raise SystemExit('Disk identifier did not match - aborting, nothing was touched.')
