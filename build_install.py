@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Regenerates install.py from the individual module files in this directory.
+Regenerates install.py from the individual module files under src/.
 
 install.py is meant to be the one file someone downloads and runs - see its
 own docstring. It's built, not hand-written: this script embeds each real
@@ -8,6 +8,14 @@ module's current source verbatim (as a plain triple-quoted string, not
 compressed or encoded, so install.py stays auditable) into one bootstrap
 file. Run this after editing any of the modules listed in MODULES below, or
 after adding/removing one, so install.py doesn't go stale.
+
+The modules live under src/ for a clean repo layout, but install.py still
+extracts them flat (directly next to itself, not into a subfolder) when
+someone runs it - that's a deliberate, separate choice from this repo's own
+organization, made so the standalone follow-up commands this toolkit
+documents (`python3 usb_map.py ...`, `python3 cpufriend.py ...`, etc.) stay
+exactly as simple for an end user as they've always been, regardless of how
+this source repo itself is organized.
 
 Every module here already avoids the sequence ''' internally (this script
 asserts that below) - if a future edit introduces one, install.py's own
@@ -24,6 +32,7 @@ original before declaring success).
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(HERE, 'src')
 
 # Dependency order matters only for readability here - hackintosh_setup.py
 # still imports the others by name once extracted, so Python's own import
@@ -156,7 +165,7 @@ if __name__ == '__main__':
 def build():
     module_dict_lines = []
     for filename in MODULES:
-        path = os.path.join(HERE, filename)
+        path = os.path.join(SRC_DIR, filename)
         with open(path, 'r') as f:
             source = f.read()
         assert "'''" not in source, (
@@ -193,7 +202,7 @@ def _verify_round_trip(install_py_path):
 
     with tempfile.TemporaryDirectory() as tmp:
         for filename, embedded_source in mod._MODULES.items():
-            original = os.path.join(HERE, filename)
+            original = os.path.join(SRC_DIR, filename)
             with open(original, 'r') as f:
                 original_source = f.read()
             if embedded_source != original_source:

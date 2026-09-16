@@ -1,5 +1,19 @@
-__pycache__/
-*.pyc
+# Runtime output from running install.py/hackintosh_setup.py - hardware
+# reports, fetched ACPI dumps, downloaded Recovery images, session logs.
 hackintosh_build/
 *.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editors
 .idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

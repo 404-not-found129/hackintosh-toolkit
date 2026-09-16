@@ -12,13 +12,18 @@ Controllers, Input, Storage Controllers, Sound).
 
 Two real, platform-level limitations, not gaps in this code:
 
-  - macOS doesn't expose real motherboard/BIOS DMI data on a Hackintosh at
-    all. Verified live: `system_profiler`/`ioreg` only ever show the
-    *spoofed* Apple identity (Model Name "Mac Pro", manufacturer
-    "Acidanthera" - OpenCore's own injected string) - there is no
-    equivalent of Windows/Linux's real DMI Type 1/Type 2 tables. Where this
-    matters (Motherboard name/chipset), macOS falls back to asking you
-    directly rather than guessing at data that provably isn't there.
+  - macOS doesn't expose real motherboard/BIOS DMI data at all - on any
+    Mac, genuine or Hackintosh, not a Hackintosh-specific gap. Verified
+    live: `system_profiler`/`ioreg` only ever show the *spoofed* Apple
+    identity (Model Name "Mac Pro", manufacturer "Acidanthera" - OpenCore's
+    own injected string) - there is no equivalent of Windows/Linux's real
+    DMI Type 1/Type 2 tables. If anything this is *more* true on a working
+    Hackintosh, not less: OpenCore's SMBIOS patch exists specifically to
+    replace what macOS sees here with a fake Apple identity, by design.
+    Where this matters (Motherboard name/chipset), macOS falls back to
+    asking you directly rather than guessing at data that provably isn't
+    there - and remembers the answer in `~/.hackintosh_toolkit_motherboard`
+    so it only asks once per machine, not once per run.
   - USB Controllers, Input devices, Sound codecs, and Storage Controllers
     all need PCI vendor/device IDs that macOS's system_profiler doesn't
     expose for the underlying controller ASIC - verified live even against
@@ -80,6 +85,29 @@ def _guess_chipset(board_name):
     return 'Unknown'
 
 
+# Cached in the home directory, not the per-run workdir, on purpose: the
+# physical motherboard doesn't change between runs on the same machine, so
+# once a human has typed it once there's no reason to ask again just
+# because a later run used a different working directory.
+_MOTHERBOARD_CACHE_PATH = os.path.expanduser('~/.hackintosh_toolkit_motherboard')
+
+
+def _load_cached_motherboard():
+    try:
+        with open(_MOTHERBOARD_CACHE_PATH, 'r') as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _save_cached_motherboard(name):
+    try:
+        with open(_MOTHERBOARD_CACHE_PATH, 'w') as f:
+            f.write(name)
+    except OSError:
+        pass  # best-effort - just means asking again next time, not fatal
+
+
 def gather_motherboard(prompt_if_unknown=True):
     osname = hw_detect.host_os()
     name = None
@@ -90,19 +118,35 @@ def gather_motherboard(prompt_if_unknown=True):
         out = _run(['powershell', '-NoProfile', '-Command', '(Get-CimInstance Win32_BaseBoard).Product'])
         name = out.strip() or None
 
-    if not name and prompt_if_unknown:
-        if osname == 'macos':
-            # No real DMI data on a Hackintosh at all (see module docstring) -
-            # this is the one field on this platform only a human can supply.
-            reason = 'macOS cannot read this on a Hackintosh'
+    if not name:
+        cached = _load_cached_motherboard()
+        if cached:
+            print(f'Motherboard model: {cached}  (remembered from a previous run on this machine - '
+                  f'delete {_MOTHERBOARD_CACHE_PATH} to be asked again)')
+            name = cached
+        elif prompt_if_unknown:
+            if osname == 'macos':
+                # Not a Hackintosh-specific gap: macOS has no dmidecode/WMI
+                # equivalent for this on ANY Mac, genuine or not - verified
+                # live, system_profiler/ioreg only ever show the *spoofed*
+                # Apple identity. If anything this is even more true once
+                # OpenCore's SMBIOS patch is active on a working Hackintosh,
+                # since that deliberately replaces what macOS sees with a
+                # fake Apple identity by design - the real board name isn't
+                # just hard to read, it's intentionally not exposed.
+                reason = ('macOS has no dmidecode/WMI equivalent for this on any Mac, real or '
+                          'Hackintosh - and once OpenCore\'s SMBIOS patch is active, it '
+                          'deliberately replaces this with a fake Apple identity anyway')
+            else:
+                # dmidecode (Linux) / WMI (Windows) normally get this - reaching
+                # here means that lookup itself failed (tool missing, permissions,
+                # etc.), not a platform-wide gap like the macOS case above.
+                reason = 'automatic detection failed on this machine'
+            name = input(f'Motherboard model (e.g. "ASUS ROG STRIX Z390-E GAMING") - {reason}: ').strip() or 'Unknown'
+            if name != 'Unknown':
+                _save_cached_motherboard(name)
         else:
-            # dmidecode (Linux) / WMI (Windows) normally get this - reaching
-            # here means that lookup itself failed (tool missing, permissions,
-            # etc.), not a platform-wide gap like the macOS case above.
-            reason = 'automatic detection failed on this machine'
-        name = input(f'Motherboard model (e.g. "ASUS ROG STRIX Z390-E GAMING") - {reason}: ').strip() or 'Unknown'
-    elif not name:
-        name = 'Unknown'
+            name = 'Unknown'
 
     return {
         'Name': name,

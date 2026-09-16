@@ -311,12 +311,68 @@ def copy_efi(built_efi_dir, efi_mount_path):
     return efi_dest
 
 
-def run(workdir, prompt_for_motherboard=True):
+_MACOS_REDIRECT_MESSAGE = """
+This machine is running macOS, and OpCore-Simplify's ACPI step is mandatory
+- dumping real ACPI tables has no macOS path at all (Apple doesn't expose
+raw ACPI tables the way Windows/Linux do, and neither this toolkit's own
+code nor the SSDTTime dependency it uses for this step has a way around
+that - see this module's docstring). This isn't a bug to report; it's a
+real platform limitation, checked here before doing any other work so you
+don't lose time typing in hardware details first.
+
+Three ways forward:
+  1. Boot a Linux live USB on this same machine - no install needed, just
+     boot from it (Ubuntu or Fedora both work) and run this same installer
+     from there. Takes about as long as making the USB itself.
+  2. Run this from a Windows or Linux machine instead, if you have one (or
+     can borrow one) - even temporarily.
+  3. If you already have a real ACPI dump from this same physical
+     machine's Windows/Linux side (e.g. from when it was first built),
+     point this tool at it directly instead of dumping a fresh one:
+         --acpi-dir <path to the folder with your .aml files>
+"""
+
+
+def parse_acpi_dir_arg(argv):
+    """Looks for --acpi-dir <path> or --acpi-dir=<path> in argv (typically
+    sys.argv[1:]). Returns the path, or None if not present."""
+    for i, arg in enumerate(argv):
+        if arg == '--acpi-dir' and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith('--acpi-dir='):
+            return arg.split('=', 1)[1]
+    return None
+
+
+def check_host_supports_efi_build(acpi_dir_override=None):
+    """
+    Raises SystemExit with a clear, actionable explanation if this host
+    can't do the EFI-build stage at all (not Windows/Linux, and no
+    --acpi-dir supplied to work around it). run() calls this itself before
+    doing any real work, but callers that do other things first (like
+    hackintosh_setup.py requiring root before it gets here) should call
+    this even earlier, so nobody's asked for a sudo password just to be
+    told the OS is wrong immediately after.
+    """
+    if not acpi_dir_override and hw_detect.host_os() not in ('windows', 'linux'):
+        print(_MACOS_REDIRECT_MESSAGE)
+        raise SystemExit(1)
+
+
+def run(workdir, prompt_for_motherboard=True, acpi_dir_override=None):
     """
     Generates a hardware report for this machine and drives OpCore-
     Simplify's real menu end to end with no human interaction needed for
     the ordinary case (see module docstring). Doesn't need a mounted disk -
     OpCore-Simplify builds into its own tool_dir/Results folder regardless.
+
+    acpi_dir_override lets a caller supply an already-dumped ACPI folder
+    (e.g. from this same physical machine's Windows/Linux side) instead of
+    dumping a fresh one - the one thing that makes running this from macOS
+    itself possible, since dump_acpi_tables() otherwise can't produce
+    anything there (see module docstring). When set, this also skips the
+    macOS/Windows/Linux host check below entirely - a supplied dump is
+    valid regardless of what's running this script.
 
     Returns (built_efi_dir, darwin_macos_version) - built_efi_dir is None
     if nothing was built (quit before finishing); darwin_macos_version is
@@ -324,19 +380,27 @@ def run(workdir, prompt_for_motherboard=True):
     got that far), so the caller can fetch the matching Recovery image
     without asking which version was picked a second time.
     """
+    check_host_supports_efi_build(acpi_dir_override)
+
     os.makedirs(workdir, exist_ok=True)
     report_path = os.path.join(workdir, 'hardware_report.json')
     hardware_report.write(report_path, prompt_for_motherboard=prompt_for_motherboard)
     print(f'Wrote hardware report to {report_path}')
 
-    acpi_tables_dir = dump_acpi_tables(os.path.join(workdir, 'acpi'))
-    if acpi_tables_dir:
-        print(f'Dumped this machine\'s ACPI tables to {acpi_tables_dir}')
+    if acpi_dir_override:
+        if not os.path.isdir(acpi_dir_override):
+            raise SystemExit(f'--acpi-dir {acpi_dir_override} is not a directory.')
+        acpi_tables_dir = acpi_dir_override
+        print(f'Using the supplied ACPI dump: {acpi_tables_dir}')
     else:
-        raise SystemExit(
-            'No ACPI dump available on this host - OpCore-Simplify hard-requires one '
-            '(see this module\'s docstring). Run this from Windows or Linux instead.'
-        )
+        acpi_tables_dir = dump_acpi_tables(os.path.join(workdir, 'acpi'))
+        if not acpi_tables_dir:
+            # Shouldn't normally reach here given the host check above - this
+            # is the safety net for when the dump itself fails on a host that
+            # should support it (missing iasl, no internet, etc.), not the
+            # macOS case, which already exited earlier with the fuller message.
+            raise SystemExit('ACPI table dump failed - see the output above for why.')
+        print(f'Dumped this machine\'s ACPI tables to {acpi_tables_dir}')
 
     tool_dir = fetch_tool(workdir)
     darwin_version = run_automated(tool_dir, report_path, acpi_tables_dir)
@@ -346,18 +410,31 @@ def run(workdir, prompt_for_motherboard=True):
     return built, darwin_version
 
 
-def build(efi_mount_path, workdir, prompt_for_motherboard=True):
+def build(efi_mount_path, workdir, prompt_for_motherboard=True, acpi_dir_override=None):
     """Convenience wrapper for when you already have a mounted EFI partition
     to write straight to: run() + copy_efi() in one call."""
-    built, darwin_version = run(workdir, prompt_for_motherboard=prompt_for_motherboard)
+    built, darwin_version = run(workdir, prompt_for_motherboard=prompt_for_motherboard,
+                                 acpi_dir_override=acpi_dir_override)
     dest = copy_efi(built, efi_mount_path) if built else None
     return dest, darwin_version
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        print(f'Usage: {sys.argv[0]} <path where the EFI partition is mounted>')
+    _argv = sys.argv[1:]
+    _positional = []
+    _skip_next = False
+    for _arg in _argv:
+        if _skip_next:
+            _skip_next = False
+        elif _arg == '--acpi-dir':
+            _skip_next = True
+        elif not _arg.startswith('--acpi-dir='):
+            _positional.append(_arg)
+
+    if len(_positional) != 1:
+        print(f'Usage: {sys.argv[0]} <path where the EFI partition is mounted> [--acpi-dir <path>]')
         sys.exit(1)
-    result, _darwin = build(sys.argv[1], os.path.join(os.getcwd(), 'opcore_simplify_work'))
+    result, _darwin = build(_positional[0], os.path.join(os.getcwd(), 'opcore_simplify_work'),
+                             acpi_dir_override=parse_acpi_dir_arg(_argv))
     if result:
         print(f'EFI written to {result}')

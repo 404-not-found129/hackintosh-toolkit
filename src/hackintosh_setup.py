@@ -3,8 +3,13 @@
 Hackintosh EFI/installer builder - main entry point, one-click by default.
 
 Runs on Windows or Linux (see opcore_simplify.py for why macOS can't run
-the EFI-build stage). Walks through, with no keypresses needed for the
-ordinary case:
+the EFI-build stage - checked immediately on startup, before the root/
+Administrator prompt or any hardware questions, so a macOS run fails fast
+with a clear explanation instead of wasting your time first). If you
+already have a real ACPI dump from this same physical machine's Windows/
+Linux side, pass it with --acpi-dir <path> to run the rest from macOS
+anyway - see opcore_simplify.py's module docstring. Walks through, with no
+keypresses needed for the ordinary case:
   1. Build a hardware report for this machine (hardware_report.py) and
      drive OpCore-Simplify's own menu end to end, answering its prompts
      with its own recommended defaults - compatibility checking, ACPI
@@ -199,6 +204,16 @@ def _read_smbios_model(efi_dest):
 def main():
     log_path = start_logging()
     print(f'Logging this session to {log_path}')
+
+    # Checked before *anything* else, including the banner and the root/
+    # Administrator check right after it - this can't be worked around by
+    # elevating, and there's no reason to ask for a sudo password (or make
+    # someone type in hardware details) on a host that's about to fail
+    # right after anyway. See opcore_simplify.py's own docstring for why
+    # this specific check can't just be deferred to later.
+    acpi_dir_override = opcore_simplify.parse_acpi_dir_arg(sys.argv[1:])
+    opcore_simplify.check_host_supports_efi_build(acpi_dir_override)
+
     banner()
     # Checked early on purpose: create_partitions() also enforces this, but
     # not until after the entire OpCore-Simplify session, disk selection,
@@ -222,6 +237,7 @@ def main():
     built_efi_dir, darwin_version = opcore_simplify.run(
         workdir=os.path.join(WORKDIR, 'opcore_simplify'),
         prompt_for_motherboard=True,
+        acpi_dir_override=acpi_dir_override,
     )
     if not built_efi_dir:
         raise SystemExit('No EFI was built (looks like it got stuck on an unrecognized prompt '

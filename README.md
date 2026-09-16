@@ -1,6 +1,8 @@
 # Hackintosh EFI / Installer Builder
 
-One file, [`install.py`](install.py), builds a Hackintosh USB installer end
+[`install.py`](install.py) has all the actual logic - one file, with a
+native double-click launcher per platform ([`install.sh`](install.sh) /
+[`install.bat`](install.bat)) - and builds a Hackintosh USB installer end
 to end on Windows or Linux (see below for why not macOS) - one-click by
 default, no separate setup step: downloads macOS straight from Apple,
 partitions a USB/SD card, and builds the OpenCore EFI using
@@ -42,10 +44,36 @@ always has. That means the documented standalone follow-up commands
 ...`, `python3 imessage.py --apply`) keep working afterward too, using
 those same extracted files.
 
-If you're working on this toolkit's source rather than just running it, use
-the individual module files listed below as normal and run
-`python3 build_install.py` afterward to regenerate `install.py` - don't
-hand-edit the embedded copies inside it.
+## Repo layout
+
+```
+install.py          the generated single-file bundle - see above
+install.sh           native launcher for install.py (macOS/Linux)
+install.bat          native launcher for install.py (Windows)
+build_install.py     regenerates install.py from src/ - run after editing anything in src/
+README.md
+src/                 the actual module source - see "What it does" below for what each one is
+    hackintosh_setup.py    main entry point / orchestrator
+    opcore_simplify.py     drives OpCore-Simplify's menu
+    hardware_report.py     builds the hardware report OpCore-Simplify needs
+    macrecovery.py         fetches macOS Recovery from Apple
+    partition.py           disk partitioning (the one destructive step)
+    write_basesystem.py    writes the Recovery image to the target partition
+    install_efi.py         post-macOS-install: EFI onto the internal disk
+    usb_map.py, cpufriend.py, imessage.py    other post-boot follow-up steps
+    hw_detect.py, net.py    shared helpers
+```
+
+If you're working on this toolkit's source rather than just running it,
+edit the files under `src/` as normal and run `python3 build_install.py`
+afterward to regenerate `install.py` - don't hand-edit the embedded copies
+inside it. Note that `install.py` still *extracts* those modules flat, next
+to itself, when someone runs it - `src/` is this repo's own organization,
+not something install.py's own users need to know about; the standalone
+follow-up commands below (`python3 usb_map.py ...` etc.) are written for
+someone who ran `install.py`, and stay exactly that simple regardless of
+how this source repo is laid out. Running a module directly from a clone of
+this repo instead needs the `src/` prefix, e.g. `python3 src/usb_map.py`.
 
 ## What it does
 
@@ -135,20 +163,33 @@ machine can boot without the USB installer left plugged in forever. See
 OpCore-Simplify's ACPI step is mandatory, and dumping real ACPI tables has
 no macOS path (same platform limitation SSDTTime has everywhere else it's
 used in this space - Apple doesn't expose raw ACPI tables the way Windows/
-Linux do). Concretely: if you run `hackintosh_setup.py` from macOS, step 2
-above prints a clear warning and returns nothing, and OpCore-Simplify's own
-menu will loop once ("No valid .aml files were found!") and then
-hard-crash the moment you select a hardware report - not a soft degradation,
-a dead end. **Run this from Windows or Linux for the EFI-build stage.**
+Linux do, and neither this toolkit's own code nor SSDTTime has a way around
+that). **Run this from Windows or Linux for the EFI-build stage.** This is
+checked immediately on startup now - before the root/Administrator prompt,
+before any hardware questions - so running it from macOS fails fast with a
+clear explanation instead of wasting your time first.
 (USB mapping, CPUFriend, and the iMessage patch afterward all still work
 fine cross-platform, including from macOS once you're at that point.
 `install_efi.py` is the one follow-up step that's macOS-only in the other
 direction - it needs the installed macOS itself to know which disk to
 target, so there's nothing for it to do until you're there anyway.)
 
-If you already have a real ACPI dump from this same physical machine's
-Windows/Linux side, you can supply that by hand when OpCore-Simplify's menu
-asks for it, even if you're running the rest of this from macOS.
+Three ways around this if macOS is genuinely all you have available right
+now:
+
+1. **Boot a Linux live USB on the same machine** - no install needed, just
+   boot from it (Ubuntu or Fedora both work) and run this same installer
+   from there.
+2. **Use a Windows or Linux machine you have, or can borrow**, even
+   temporarily.
+3. **Supply an existing ACPI dump** if you already have one from this same
+   physical machine's Windows/Linux side (e.g. from when it was first
+   built) - this lets you run everything else, including from macOS:
+   ```bash
+   python3 install.py --acpi-dir /path/to/your/aml/files
+   ```
+   (Works the same way with `install.sh`/`install.bat`, or passed straight
+   to `opcore_simplify.py` if you're driving that module directly.)
 
 ## Prerequisites
 
@@ -170,21 +211,36 @@ asks for it, even if you're running the rest of this from macOS.
 
 ## Usage
 
-Download just [`install.py`](install.py) (it's the whole toolkit - see
-above) and run it the same way on any platform:
+Download [`install.py`](install.py) plus the launcher for your OS -
+[`install.sh`](install.sh) (macOS/Linux) or [`install.bat`](install.bat)
+(Windows) - and run that:
 
 ```bash
-python3 install.py      # macOS/Linux
+./install.sh            # macOS/Linux
+```
+
+```
+install.bat              :: Windows - double-click it, or run from Command Prompt/PowerShell
+```
+
+Both launchers just find a Python interpreter and hand off to
+`install.py` - it's still the one file with all the actual logic (see
+above); the launchers exist so there's a native, double-clickable entry
+point on every platform instead of having to know to type `python3
+install.py` yourself. If you'd rather skip the launcher, that works too:
+
+```bash
+python3 install.py      # macOS/Linux, equivalent to ./install.sh
 ```
 
 ```powershell
-python install.py       # Windows, from an ordinary (non-elevated) PowerShell
+python install.py       # Windows, equivalent to install.bat
 ```
 
-No `sudo`/"Run as Administrator" prefix needed - if it isn't already
-elevated, it relaunches itself and you'll see the normal sudo password
-prompt (macOS/Linux) or UAC dialog (Windows). On Windows that dialog opens
-in a new console window; watch that one from here on.
+No `sudo`/"Run as Administrator" prefix needed either way - if it isn't
+already elevated, `install.py` relaunches itself and you'll see the normal
+sudo password prompt (macOS/Linux) or UAC dialog (Windows). On Windows
+that dialog opens in a new console window; watch that one from here on.
 
 It walks through hardware report + ACPI dump generation, driving OpCore-
 Simplify's own menu automatically (fetching the matching Recovery image for
