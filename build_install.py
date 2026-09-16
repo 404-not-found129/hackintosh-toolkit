@@ -37,6 +37,7 @@ MODULES = [
     'partition.py',
     'write_basesystem.py',
     'opcore_simplify.py',
+    'install_efi.py',
     'imessage.py',
     'usb_map.py',
     'cpufriend.py',

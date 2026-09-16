@@ -38,8 +38,9 @@ same as reading any of the individual `.py` files below.
 On first run it extracts every module to a real `.py` file next to itself,
 then imports and runs them exactly as this repository's own module layout
 always has. That means the documented standalone follow-up commands
-(`python3 usb_map.py ...`, `python3 cpufriend.py ...`, `python3 imessage.py
---apply`) keep working afterward too, using those same extracted files.
+(`python3 install_efi.py`, `python3 usb_map.py ...`, `python3 cpufriend.py
+...`, `python3 imessage.py --apply`) keep working afterward too, using
+those same extracted files.
 
 If you're working on this toolkit's source rather than just running it, use
 the individual module files listed below as normal and run
@@ -120,6 +121,15 @@ hand-edit the embedded copies inside it.
 10. **Logs the whole session** to `hackintosh_build/session_<timestamp>.log`
     so a failed run can be diagnosed after the fact.
 
+Everything above runs before macOS itself is even installed - it only
+builds the USB installer. One more step happens after, from the installed
+macOS itself: **`install_efi.py`** copies the same built EFI onto the
+*internal* target disk's own EFI System Partition (every GPT disk macOS's
+own Disk Utility creates has one, whether or not Finder shows it) and
+best-effort registers it as the default boot entry via `bless`, so the
+machine can boot without the USB installer left plugged in forever. See
+"After it finishes" below for exactly when to run it.
+
 ## The one real constraint this architecture has: run it from Windows or Linux
 
 OpCore-Simplify's ACPI step is mandatory, and dumping real ACPI tables has
@@ -131,7 +141,10 @@ menu will loop once ("No valid .aml files were found!") and then
 hard-crash the moment you select a hardware report - not a soft degradation,
 a dead end. **Run this from Windows or Linux for the EFI-build stage.**
 (USB mapping, CPUFriend, and the iMessage patch afterward all still work
-fine cross-platform, including from macOS once you're at that point.)
+fine cross-platform, including from macOS once you're at that point.
+`install_efi.py` is the one follow-up step that's macOS-only in the other
+direction - it needs the installed macOS itself to know which disk to
+target, so there's nothing for it to do until you're there anyway.)
 
 If you already have a real ACPI dump from this same physical machine's
 Windows/Linux side, you can supply that by hand when OpCore-Simplify's menu
@@ -218,8 +231,17 @@ in, unplug everything except your actual target first.
 python3 usb_map.py /Volumes/EFI/EFI
 ```
 
-`cpufriend.py` can *only* run once macOS is fully installed and booted (not
-just Recovery), since its source data lives inside the running OS:
+`install_efi.py` and `cpufriend.py` can *only* run once macOS is fully
+installed and booted (not just Recovery) - `install_efi.py` because it's
+putting OpenCore onto the disk that installed macOS now lives on,
+`cpufriend.py` because its source data lives inside the running OS. Run
+`install_efi.py` first, with the USB installer still plugged in (it's the
+source it copies from):
+
+```bash
+sudo python3 install_efi.py                    # auto-detects the USB's EFI
+sudo python3 install_efi.py /Volumes/EFI/EFI    # or point it at one explicitly
+```
 
 ```bash
 python3 cpufriend.py /Volumes/EFI/EFI
@@ -247,9 +269,16 @@ python3 imessage.py --apply    # actually clean up
    the end of the build (BIOS requirements, USB mapping reminder).
 5. If you skipped USB mapping earlier, run `usb_map.py` now, as shown
    above, from within Recovery or the installed system.
-6. Once macOS is actually installed and booted, run `cpufriend.py` if you
-   want CPUFriend and confirmed `CPUFriend.kext` is present.
-7. Sign into iMessage/FaceTime. If it doesn't activate, work through the
+6. Once macOS is actually installed and booted (with the USB installer
+   still plugged in), run `sudo python3 install_efi.py` to put OpenCore
+   onto the internal disk itself - without this, the USB stays required
+   for every future boot, since it's the only place OpenCore exists so
+   far. It also tries to make this the default boot entry via `bless`; if
+   that doesn't take on your board, set it as the default in the BIOS/UEFI
+   setup menu instead (same screen from step 1).
+7. Once that's done, you can boot without the USB. Run `cpufriend.py` if
+   you want CPUFriend and confirmed `CPUFriend.kext` is present.
+8. Sign into iMessage/FaceTime. If it doesn't activate, work through the
    checklist `imessage.py` printed after copying the EFI on - Apple ID
    history matters more than any config detail.
 
