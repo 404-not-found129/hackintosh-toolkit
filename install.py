@@ -672,6 +672,50 @@ def _save_cached_motherboard(name):
         pass  # best-effort - just means asking again next time, not fatal
 
 
+# Confirmed live, not theoretical: a one-word reply meant for something
+# else entirely ("OK", answering an unrelated question) got typed at this
+# exact prompt, accepted with zero validation, and cached - every build
+# after that silently fed OpCore-Simplify a nonexistent motherboard name
+# and an unrecognized ("Unknown") chipset, with nothing anywhere warning
+# that anything was wrong, until it was caught days later by manually
+# inspecting a generated config.plist's chipset-gated settings.
+_IMPLAUSIBLE_BOARD_NAMES = {
+    'ok', 'okay', 'yes', 'no', 'n/a', 'na', 'none', 'unknown', 'test',
+    'idk', 'dunno', 'sure', 'fine', 'thanks', 'yep', 'nope',
+}
+
+
+def _prompt_and_validate_motherboard(reason):
+    """
+    Prompts for the motherboard model, rejecting obviously-implausible
+    answers outright (see _IMPLAUSIBLE_BOARD_NAMES above) rather than
+    silently caching them.
+
+    A plausible-looking answer that still doesn't match any chipset this
+    toolkit recognizes (_guess_chipset() returns 'Unknown') is still
+    accepted after explicit confirmation - that's a real, if less common,
+    case for a genuinely obscure or OEM board - but the person typing it
+    is told so first, since an unrecognized chipset has real downstream
+    effects (OpCore-Simplify's own chipset-gated Booter/Kernel quirks
+    silently take their generic/unrecognized-chipset path instead of the
+    correct one for that specific board).
+    """
+    while True:
+        name = input(f'Motherboard model (e.g. "ASUS ROG STRIX Z390-E GAMING") - {reason}: ').strip()
+        if not name:
+            return 'Unknown'
+        if name.lower() in _IMPLAUSIBLE_BOARD_NAMES:
+            print(f'"{name}" doesn\'t look like a real motherboard model - try again, '
+                  f'or leave blank if you genuinely don\'t know it.')
+            continue
+        if _guess_chipset(name) == 'Unknown':
+            print(f'Couldn\'t recognize a chipset in "{name}" - this toolkit\'s own chipset list may just not '
+                  f'include yours, but double-check you typed the actual motherboard model (not the CPU or GPU).')
+            if input('Use it anyway? [Y/n]: ').strip().lower() == 'n':
+                continue
+        return name
+
+
 def gather_motherboard(prompt_if_unknown=True):
     osname = hw_detect.host_os()
     name = None
@@ -684,6 +728,13 @@ def gather_motherboard(prompt_if_unknown=True):
 
     if not name:
         cached = _load_cached_motherboard()
+        if cached and cached.lower() in _IMPLAUSIBLE_BOARD_NAMES:
+            # Don't trust a bad cache even if one's already there (e.g. from
+            # before this validation existed) - see _IMPLAUSIBLE_BOARD_NAMES'
+            # comment for exactly how this happened live. Fall through to
+            # asking fresh instead of silently repeating the same mistake.
+            print(f'Ignoring implausible cached motherboard model "{cached}" from {_MOTHERBOARD_CACHE_PATH} - asking fresh.')
+            cached = None
         if cached:
             print(f'Motherboard model: {cached}  (remembered from a previous run on this machine - '
                   f'delete {_MOTHERBOARD_CACHE_PATH} to be asked again)')
@@ -706,7 +757,7 @@ def gather_motherboard(prompt_if_unknown=True):
                 # here means that lookup itself failed (tool missing, permissions,
                 # etc.), not a platform-wide gap like the macOS case above.
                 reason = 'automatic detection failed on this machine'
-            name = input(f'Motherboard model (e.g. "ASUS ROG STRIX Z390-E GAMING") - {reason}: ').strip() or 'Unknown'
+            name = _prompt_and_validate_motherboard(reason)
             if name != 'Unknown':
                 _save_cached_motherboard(name)
         else:
