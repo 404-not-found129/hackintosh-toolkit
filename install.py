@@ -3725,7 +3725,13 @@ def _self_elevate():
         if os.geteuid() == 0:
             return
         print('Not running as root - relaunching with sudo (you may be asked for your password)...')
-        os.execvp('sudo', ['sudo', sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+        try:
+            os.execvp('sudo', ['sudo', sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+        except FileNotFoundError:
+            raise SystemExit(
+                'sudo not found on this system - install it, or re-run this script '
+                'yourself as root (e.g. via su).'
+            )
 
 
 def _extract_modules():
