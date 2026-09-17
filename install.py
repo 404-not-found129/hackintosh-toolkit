@@ -772,13 +772,61 @@ def _intel_codename_from_igpu(gpus):
     return None
 
 
+# Desktop Ryzen model-number prefix -> Zen microarchitecture codename, from
+# AMD's own well-documented model numbering (matches OpCore-Simplify's own
+# Scripts/datasets/cpu_data.py AMDCPUGenerations spelling exactly, so a
+# match here is guaranteed spelled the way its checks - present or future -
+# would expect). Desktop-tier (non-APU) chips only: an AMD brand string
+# alone can't reliably distinguish a desktop part from a "G"-suffixed APU
+# of the same numeric generation (e.g. 5600X vs 5600G are different silicon
+# despite the shared "56" prefix) - see _amd_codename()'s docstring for how
+# that's handled, rather than guessed at.
+RYZEN_DESKTOP_GENERATION = (
+    ('1', 'Summit Ridge'),   # Ryzen 1000 (Zen)
+    ('2', 'Pinnacle Ridge'),  # Ryzen 2000 (Zen+)
+    ('3', 'Matisse'),         # Ryzen 3000 (Zen 2)
+    ('5', 'Vermeer'),         # Ryzen 5000 (Zen 3)
+    ('7', 'Raphael'),         # Ryzen 7000 (Zen 4)
+    ('9', 'Granite Ridge'),   # Ryzen 9000 (Zen 5)
+)
+
+
+def _amd_codename(brand):
+    """
+    Best-effort desktop Ryzen codename from the model number in the brand
+    string (e.g. "AMD Ryzen 7 5800X 8-Core Processor" -> "5800X" -> "5"
+    generation prefix -> "Vermeer"). Returns None (not a guess) for an APU
+    ("G"-suffixed model, e.g. 5600G) or Threadripper/EPYC, since their
+    codenames don't follow this same desktop numbering and a wrong codename
+    is worse than an honest 'Unknown' - OpCore-Simplify's own compatibility
+    logic falls back safely on 'Unknown' (see module docstring), not on a
+    silently wrong one.
+    """
+    if 'THREADRIPPER' in brand.upper() or 'EPYC' in brand.upper():
+        return None
+    match = re.search(r'\bRyzen\s+\d\s+(\d)(\d{3})([A-Z]*)\b', brand, re.IGNORECASE)
+    if not match:
+        return None
+    generation_digit, _model_rest, suffix = match.groups()
+    if 'G' in suffix.upper():
+        return None  # APU - different silicon/codename per generation, not this table
+    for prefix, codename in RYZEN_DESKTOP_GENERATION:
+        if generation_digit == prefix:
+            return codename
+    return None
+
+
 def gather_cpu(gpus=None):
     osname = hw_detect.host_os()
     cpu = hw_detect.get_cpu_info()
     brand = cpu['brand']
     manufacturer = 'AMD' if 'AMD' in brand.upper() or 'RYZEN' in brand.upper() else 'Intel'
 
-    codename = (_intel_codename_from_igpu(gpus or hw_detect.get_gpus()) if manufacturer == 'Intel' else None) or 'Unknown'
+    if manufacturer == 'Intel':
+        codename = _intel_codename_from_igpu(gpus or hw_detect.get_gpus())
+    else:
+        codename = _amd_codename(brand)
+    codename = codename or 'Unknown'
 
     core_count = '1'
     if osname == 'macos':
