@@ -33,8 +33,21 @@ def write(dmg_path, target_partition):
     osname = hw_detect.host_os()
 
     if osname == 'macos':
-        print(f'Restoring {dmg_path} -> {target_partition} with asr (this can take a while)...')
-        _run(['asr', 'restore', '--source', dmg_path, '--target', target_partition,
+        # asr's own man page: "--target can be a /dev entry, or volume
+        # mountpoint" - a bare diskutil identifier like "disk5s3" is
+        # neither, and asr silently resolves it as a *relative filesystem
+        # path* from the current directory instead of a disk identifier
+        # (confirmed live: the exact error was '"<cwd>/disk5s3" is not a
+        # volume', not any kind of "unknown device" message - a bare id
+        # doesn't start with "/", so plain path resolution kicks in).
+        # partition.py's create_partitions()/mount_efi() intentionally
+        # return/use bare identifiers throughout (that's diskutil's own
+        # convention, matched consistently there), so it's this call site's
+        # job to add the /dev/ prefix asr specifically requires, not
+        # partition.py's.
+        target = target_partition if target_partition.startswith('/dev/') else f'/dev/{target_partition}'
+        print(f'Restoring {dmg_path} -> {target} with asr (this can take a while)...')
+        _run(['asr', 'restore', '--source', dmg_path, '--target', target,
               '--erase', '--noprompt'])
         return
 

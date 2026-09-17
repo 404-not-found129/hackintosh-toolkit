@@ -1462,11 +1462,60 @@ def confirm_and_wipe(disk_id, label, size_gib=None, auto=False):
         raise SystemExit('Confirmation did not match - aborting, nothing was touched.')
 
 
+def _find_macos_partitions(disk_id):
+    """
+    Finds the real EFI and TARGET partition identifiers on disk_id after
+    partitioning it, by querying `diskutil list -plist` and matching on
+    VolumeName/Content - NOT by assuming disk_id+'s1'/'s2', which this
+    function replaced after that assumption broke a real installer run.
+
+    Verified live: on at least one real SD card (an internal disk image
+    does *not* reproduce this - only tested and confirmed on physical
+    media), `diskutil partitionDisk <disk> GPT FAT32 EFI 300M JHFS+ TARGET R`
+    silently prepended its own extra, genuinely-typed EFI System Partition
+    ahead of the two partitions actually requested, producing THREE
+    partitions instead of two: the real auto-created EFI first, the
+    requested FAT32 one demoted to generic "Microsoft Basic Data" content
+    (despite being named "EFI"), then TARGET last. The old disk_id+'s1'/'s2'
+    code happened to still get a working EFI partition (macOS's own
+    auto-created one landed on s1) but pointed target_partition at the
+    wrong partition - the demoted FAT32 one, not TARGET - which then made
+    write_basesystem.py's `asr restore --target` fail outright ("is not a
+    volume"), confirmed against the traceback that reproduced this.
+
+    When only one "EFI"-named partition exists (the case an internal disk
+    image *does* reproduce, and evidently some real media too), that one is
+    used regardless of its reported Content type. When more than one
+    exists, the one actually typed "EFI" (a real GPT ESP, which is what
+    firmware needs to recognize it as bootable) is preferred over a
+    same-named but differently-typed impostor.
+    """
+    import plistlib
+    out = _run(['diskutil', 'list', '-plist', disk_id], check=False, quiet=True).stdout
+    data = plistlib.loads(out.encode())
+    partitions = [
+        p
+        for d in data.get('AllDisksAndPartitions', [])
+        if d.get('DeviceIdentifier') == disk_id
+        for p in d.get('Partitions', [])
+    ]
+
+    target = next((p for p in partitions if p.get('VolumeName') == 'TARGET'), None)
+    if not target:
+        raise RuntimeError(f'No TARGET partition found on {disk_id} after partitioning: {partitions}')
+
+    efi_candidates = [p for p in partitions if p.get('VolumeName') == 'EFI']
+    if not efi_candidates:
+        raise RuntimeError(f'No EFI partition found on {disk_id} after partitioning: {partitions}')
+    efi = next((p for p in efi_candidates if p.get('Content') == 'EFI'), efi_candidates[0])
+
+    return efi['DeviceIdentifier'], target['DeviceIdentifier']
+
+
 def create_partitions(disk_id):
     """
-    Wipes disk_id and lays down:
-      partition 1: EFI System Partition, FAT32, EFI_SIZE_MIB
-      partition 2: rest of the disk, for the macOS BaseSystem image
+    Wipes disk_id and lays down an EFI System Partition (FAT32,
+    EFI_SIZE_MIB) and a second partition (for the macOS BaseSystem image).
     Returns (efi_partition_id, target_partition_id) - OS-native identifiers
     you can pass into write_basesystem.py / opcore_simplify.py.
     """
@@ -1478,7 +1527,7 @@ def create_partitions(disk_id):
         _run(['diskutil', 'partitionDisk', disk_id, 'GPT',
               'FAT32', 'EFI', f'{EFI_SIZE_MIB}M',
               'JHFS+', 'TARGET', 'R'])
-        return f'{disk_id}s1', f'{disk_id}s2'
+        return _find_macos_partitions(disk_id)
 
     if osname == 'linux':
         _run(['sgdisk', '--zap-all', disk_id])
@@ -1587,8 +1636,21 @@ def write(dmg_path, target_partition):
     osname = hw_detect.host_os()
 
     if osname == 'macos':
-        print(f'Restoring {dmg_path} -> {target_partition} with asr (this can take a while)...')
-        _run(['asr', 'restore', '--source', dmg_path, '--target', target_partition,
+        # asr's own man page: "--target can be a /dev entry, or volume
+        # mountpoint" - a bare diskutil identifier like "disk5s3" is
+        # neither, and asr silently resolves it as a *relative filesystem
+        # path* from the current directory instead of a disk identifier
+        # (confirmed live: the exact error was '"<cwd>/disk5s3" is not a
+        # volume', not any kind of "unknown device" message - a bare id
+        # doesn't start with "/", so plain path resolution kicks in).
+        # partition.py's create_partitions()/mount_efi() intentionally
+        # return/use bare identifiers throughout (that's diskutil's own
+        # convention, matched consistently there), so it's this call site's
+        # job to add the /dev/ prefix asr specifically requires, not
+        # partition.py's.
+        target = target_partition if target_partition.startswith('/dev/') else f'/dev/{target_partition}'
+        print(f'Restoring {dmg_path} -> {target} with asr (this can take a while)...')
+        _run(['asr', 'restore', '--source', dmg_path, '--target', target,
               '--erase', '--noprompt'])
         return
 
