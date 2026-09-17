@@ -3,6 +3,25 @@
 hackintosh_build/
 *.log
 
+# install.py extracts every module flat into its own directory when run
+# (see its docstring) - harmless for an end user who downloaded just that
+# one file, but running it from *this* repo checkout instead of a separate
+# directory clutters the repo root with stale copies that shadow src/. Keep
+# this list in sync with build_install.py's MODULES if that ever changes.
+/hw_detect.py
+/net.py
+/hardware_report.py
+/macos_acpi.py
+/macrecovery.py
+/partition.py
+/write_basesystem.py
+/opcore_simplify.py
+/install_efi.py
+/imessage.py
+/usb_map.py
+/cpufriend.py
+/hackintosh_setup.py
+
 # Python
 __pycache__/
 *.pyc

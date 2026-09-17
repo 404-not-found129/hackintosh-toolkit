@@ -3,8 +3,8 @@
 [`install.py`](install.py) has all the actual logic - one file, with a
 native double-click launcher per platform ([`install.sh`](install.sh) /
 [`install.bat`](install.bat)) - and builds a Hackintosh USB installer end
-to end on Windows or Linux (see below for why not macOS) - one-click by
-default, no separate setup step: downloads macOS straight from Apple,
+to end on Windows, Linux, **or macOS** - one-click by default, no separate
+setup step: downloads macOS straight from Apple,
 partitions a USB/SD card, and builds the OpenCore EFI using
 [OpCore-Simplify](https://github.com/lzhoang2801/OpCore-Simplify) - a real,
 actively-maintained community tool - rather than a from-scratch config
@@ -16,15 +16,19 @@ hand, fetching macOS, partitioning, and the handful of things that still
 need to happen afterward (USB port mapping, CPUFriend, iMessage's known
 activation fixes).
 
-Two kinds of question still stop and ask a real person, because there's no
-safe default to fall back on: which GPU/WiFi/Bluetooth device to use when a
-machine has more than one (picking wrong can mean no video output or no
-WiFi), and whether to accept OpenCore Legacy Patcher's SIP/AMFI tradeoff on
-hardware that needs it. Everything else - including the disk-wipe
-confirmation, when exactly one USB/SD device is connected, and elevating to
-root/Administrator - proceeds without a keypress (you'll still see the
-normal sudo password prompt or Windows UAC dialog; this doesn't bypass
-that). See "Automation and safety" below before you run this.
+You're asked to confirm which macOS version to install and which USB/SD
+card to use - both show a sensible default (the suggested macOS version;
+the only connected USB/SD device) that a single Enter accepts, so the
+common case is still just a keypress, not typing. Two more kinds of
+question stop with no default at all, because there genuinely isn't a safe
+one: which GPU/WiFi/Bluetooth device to use when a machine has more than
+one (picking wrong can mean no video output or no WiFi), and whether to
+accept OpenCore Legacy Patcher's SIP/AMFI tradeoff on hardware that needs
+it. Everything else - disk partitioning/wiping once you've confirmed the
+disk, and elevating to root/Administrator - proceeds on its own (you'll
+still see the normal sudo password prompt or Windows UAC dialog; this
+doesn't bypass that). See "Automation and safety" below before you run
+this.
 
 ## One file, not one tool bolted onto many
 
@@ -56,6 +60,7 @@ src/                 the actual module source - see "What it does" below for wha
     hackintosh_setup.py    main entry point / orchestrator
     opcore_simplify.py     drives OpCore-Simplify's menu
     hardware_report.py     builds the hardware report OpCore-Simplify needs
+    macos_acpi.py           real ACPI tables straight from IOKit, on macOS
     macrecovery.py         fetches macOS Recovery from Apple
     partition.py           disk partitioning (the one destructive step)
     write_basesystem.py    writes the Recovery image to the target partition
@@ -75,6 +80,14 @@ someone who ran `install.py`, and stay exactly that simple regardless of
 how this source repo is laid out. Running a module directly from a clone of
 this repo instead needs the `src/` prefix, e.g. `python3 src/usb_map.py`.
 
+**Don't test-run `install.py` from inside this repo checkout** - it'll
+extract flat copies of every module into the repo root, shadowing (and
+quickly going stale against) the real ones under `src/`. Copy `install.py`
+to a separate directory first, the same way an actual end user would have
+gotten just that one file. (`.gitignore` has a safety net for the root-level
+filenames this could produce, so a stray extraction here can't silently
+get committed - but avoiding it in the first place is simpler.)
+
 ## What it does
 
 1. **Builds a hardware report** describing this machine's CPU/GPU/
@@ -88,11 +101,17 @@ this repo instead needs the `src/` prefix, e.g. `python3 src/usb_map.py`.
    chipset, and PCI IDs for USB controllers/input devices/sound codecs) that
    plain macOS genuinely doesn't expose on a Hackintosh, verified live
    rather than assumed (`hardware_report.py`).
-2. **Dumps this machine's real ACPI tables** (Windows/Linux) - required,
-   not optional: reading OpCore-Simplify's own source shows it calls
-   `ensure_dsdt()` unconditionally right after you select a hardware
-   report, and hard-crashes without one (verified live). Uses corpnewt's
-   SSDTTime (MIT) for just this dump step (`opcore_simplify.py`).
+2. **Dumps this machine's real ACPI tables** - required, not optional:
+   reading OpCore-Simplify's own source shows it calls `ensure_dsdt()`
+   unconditionally right after you select a hardware report, and
+   hard-crashes without one (verified live). Uses corpnewt's SSDTTime
+   (MIT) on Windows/Linux; on macOS, reads them straight from IOKit's own
+   `AppleACPIPlatformExpert` "ACPI Tables" property instead (the same
+   technique [Hackintool](https://github.com/benbaker76/Hackintool) uses
+   for its own ACPI dump feature) - real tables, not reimplemented or
+   guessed at, verified live to load cleanly through OpCore-Simplify's own
+   unmodified loader and produce a complete, working EFI
+   (`opcore_simplify.py`, `macos_acpi.py`).
 3. **Drives OpCore-Simplify's own real menu end to end**, pre-loaded with
    that hardware report and ACPI dump - compatibility checking, macOS
    version selection, ACPI patch generation, kext selection, and SMBIOS
@@ -105,20 +124,21 @@ this repo instead needs the `src/` prefix, e.g. `python3 src/usb_map.py`.
    Patcher SIP/AMFI tradeoff) still stop and wait for you; anything this
    driver's prompt table doesn't recognize at all also falls back to a
    real prompt instead of guessing (`opcore_simplify.py`).
-4. **Fetches the Recovery/BaseSystem image for whichever macOS version
-   OpCore-Simplify picked** - captured directly from its own menu, not
-   asked again - straight from Apple's own Internet Recovery servers, same
-   protocol a real Mac uses, nothing mirrored or redistributed
-   (`macrecovery.py`).
-5. **Auto-detects your USB/SD card**: if exactly one is already connected
-   when you run this, it's used immediately with no prompt; otherwise it
-   waits for you to plug one in (physically unavoidable) or asks you to
-   pick, if several are connected at once. Only ever offers removable
-   media, verified live against a real Hackintosh where internal NVMe
-   drives report as "external" (a genuine quirk, no real ACPI/PCI
-   "internal" marker exists on non-Mac boards) - detection is bus/
-   transport-based, not the OS's own internal/external flag
-   (`partition.py`).
+4. **Fetches the Recovery/BaseSystem image for whichever macOS version you
+   picked** - captured directly from OpCore-Simplify's own "Select macOS
+   Version" menu, not asked a second time - straight from Apple's own
+   Internet Recovery servers, same protocol a real Mac uses, nothing
+   mirrored or redistributed (`macrecovery.py`).
+5. **Detects your USB/SD card and asks you to confirm it** - if exactly
+   one is already connected, it's shown as the default (press Enter to
+   take it); with several connected, or none yet (it'll wait for you to
+   plug one in - physically unavoidable), you get a list and pick
+   explicitly. Never silently picked without you seeing and confirming it,
+   even when there's only one candidate. Only ever offers removable media,
+   verified live against a real Hackintosh where internal NVMe drives
+   report as "external" (a genuine quirk, no real ACPI/PCI "internal"
+   marker exists on non-Mac boards) - detection is bus/transport-based,
+   not the OS's own internal/external flag (`partition.py`).
 6. **Partitions it and writes the BaseSystem image on** - EFI System
    Partition + a partition for the image. If exactly one USB/SD device is
    connected, wiping it is auto-confirmed after a 5-second countdown
@@ -158,38 +178,43 @@ best-effort registers it as the default boot entry via `bless`, so the
 machine can boot without the USB installer left plugged in forever. See
 "After it finishes" below for exactly when to run it.
 
-## The one real constraint this architecture has: run it from Windows or Linux
+## macOS is a real, working platform here - not just Windows/Linux
 
-OpCore-Simplify's ACPI step is mandatory, and dumping real ACPI tables has
-no macOS path (same platform limitation SSDTTime has everywhere else it's
-used in this space - Apple doesn't expose raw ACPI tables the way Windows/
-Linux do, and neither this toolkit's own code nor SSDTTime has a way around
-that). **Run this from Windows or Linux for the EFI-build stage.** This is
-checked immediately on startup now - before the root/Administrator prompt,
-before any hardware questions - so running it from macOS fails fast with a
-clear explanation instead of wasting your time first.
-(USB mapping, CPUFriend, and the iMessage patch afterward all still work
-fine cross-platform, including from macOS once you're at that point.
-`install_efi.py` is the one follow-up step that's macOS-only in the other
-direction - it needs the installed macOS itself to know which disk to
-target, so there's nothing for it to do until you're there anyway.)
+OpCore-Simplify's ACPI step is mandatory - reading its own source shows it
+hard-crashes without real ACPI tables the moment you select a hardware
+report. That step used to need Windows or Linux, because dumping raw ACPI
+tables the way SSDTTime does (`/sys/firmware/acpi/tables` on Linux, a
+WinRing0-based read on Windows) genuinely has no macOS equivalent - Apple
+doesn't expose the tables that way on any Mac, real or Hackintosh.
 
-Three ways around this if macOS is genuinely all you have available right
-now:
+macOS doesn't need that path, though: `AppleACPIPlatformExpert`, the IOKit
+service every macOS install already has, keeps the real, parsed tables in
+its own `"ACPI Tables"` property - readable with one API call
+(`IORegistryEntryCreateCFProperty`), no root required. This isn't
+speculative - it's the exact technique
+[Hackintool](https://github.com/benbaker76/Hackintool) (actively
+maintained) uses for its own "Dump ACPI Tables" feature, read directly from
+its current source rather than assumed. `macos_acpi.py` implements it in
+pure `ctypes` (no PyObjC dependency), validates every table's declared
+length and checksum before trusting it, and was verified live: the tables
+it extracts loaded cleanly through OpCore-Simplify's own unmodified
+`ACPIGuru`, and a full run produced a real, complete EFI (valid
+`config.plist`, correct SMBIOS, real ACPI patches applied) - the exact code
+path that used to hard-crash on macOS, now working end to end.
 
-1. **Boot a Linux live USB on the same machine** - no install needed, just
-   boot from it (Ubuntu or Fedora both work) and run this same installer
-   from there.
-2. **Use a Windows or Linux machine you have, or can borrow**, even
-   temporarily.
-3. **Supply an existing ACPI dump** if you already have one from this same
-   physical machine's Windows/Linux side (e.g. from when it was first
-   built) - this lets you run everything else, including from macOS:
-   ```bash
-   python3 install.py --acpi-dir /path/to/your/aml/files
-   ```
-   (Works the same way with `install.sh`/`install.bat`, or passed straight
-   to `opcore_simplify.py` if you're driving that module directly.)
+So: **Windows, Linux, and macOS are all fully supported for the whole
+build, including the EFI stage.** Nothing to configure - it's automatic
+based on which OS you're running.
+
+If macOS's live extraction ever fails on a specific machine (a future
+macOS version hiding this property, an unusual ACPI implementation, etc.)
+this is reported the same way any other dump failure is, with the same
+fallback still available - supply an existing ACPI dump directly:
+```bash
+python3 install.py --acpi-dir /path/to/your/aml/files
+```
+(Works the same way with `install.sh`/`install.bat`, or passed straight to
+`opcore_simplify.py` if you're driving that module directly.)
 
 ## Prerequisites
 
@@ -208,6 +233,10 @@ now:
 - **Linux, for ACPI dumping**: `dmidecode` and `mokutil` if available (used
   for the hardware report's Motherboard/BIOS sections); ACPI dumping itself
   just reads `/sys/firmware/acpi/tables`, already accessible as root.
+- **macOS, for ACPI dumping**: nothing extra - `macos_acpi.py` reads real
+  tables straight from IOKit (see "macOS is a real, working platform"
+  above), no root and no additional packages needed for that step
+  specifically (the toolkit overall still needs root for partitioning).
 
 ## Usage
 
@@ -243,21 +272,30 @@ sudo password prompt (macOS/Linux) or UAC dialog (Windows). On Windows
 that dialog opens in a new console window; watch that one from here on.
 
 It walks through hardware report + ACPI dump generation, driving OpCore-
-Simplify's own menu automatically (fetching the matching Recovery image for
-whichever macOS version it picked, with no need to ask which one), USB/SD
-card auto-detection, partitioning, download, imaging, copying the EFI on,
-the iMessage patch, and USB mapping (automatic on Linux). See "Automation
-and safety" below for exactly which two situations still stop and ask you
-something, and why.
+Simplify's own menu automatically (asking which macOS version to install
+via its own real menu, then fetching the matching Recovery image for
+whatever you picked - no need to say it twice), USB/SD card auto-detection,
+partitioning, download, imaging, copying the EFI on, the iMessage patch,
+and USB mapping (automatic on Linux). See "Automation and safety" below
+for exactly which situations still stop and ask you something, and why.
 
 ## Automation and safety
 
 This toolkit answers OpCore-Simplify's own menu prompts itself (see
 `opcore_simplify.py`'s module docstring for the full list, each verified
 against its actual source) rather than asking you to type them in. Two
-kinds of question are deliberately left for a real person, because there's
-no safe default:
+questions still show a default you can accept with a single Enter, and two
+more have no default at all - genuinely nothing is ever picked for you
+silently, without you seeing and confirming it:
 
+- **Which macOS version to install.** OpenCore-Simplify's own "Select
+  macOS Version" menu - it prints its suggested/compatible version and
+  every other option right there; press Enter to take the suggestion or
+  type a different one.
+- **Which USB/SD device to use.** With exactly one connected, it's shown
+  as the default - press Enter to use it. With several connected (or none
+  yet - it waits for you to plug one in), you get a list and pick
+  explicitly; see `hackintosh_setup.py`'s `choose_disk()`.
 - **Multiple GPU/WiFi/Bluetooth devices detected.** OpCore-Simplify's own
   menu has no "recommended" choice here - picking the wrong one can mean no
   video output or no WiFi/Bluetooth. Only comes up on hardware with more
@@ -273,13 +311,15 @@ falls back to asking you, rather than guessing - and if the exact same
 unrecognized prompt repeats three times in a row, the build stops rather
 than looping forever silently.
 
-**The disk-wipe step is auto-confirmed only when there is exactly one
-USB/SD device connected** - it prints the disk identifier, size, and label,
-then waits 5 seconds (Ctrl+C to abort) before erasing it. With zero or more
-than one candidate connected, it always falls back to picking/typing a
-confirmation by hand, since there's no safe default for "which disk". If
-you're running this somewhere multiple removable drives might be plugged
-in, unplug everything except your actual target first.
+**The disk-wipe step itself is auto-confirmed (a 5-second countdown,
+Ctrl+C to abort) only when there was exactly one USB/SD device to choose
+from** - since you already just confirmed that specific disk at the
+selection prompt above. With several candidates to choose from, wiping
+still asks you to type the disk identifier back a second time, since
+having to pick from a list is exactly the situation where a mis-click is
+easiest. If you're running this somewhere multiple removable drives might
+be plugged in, unplug everything except your actual target first to get
+the single-candidate (and therefore simpler) path.
 
 ### Re-running the follow-up steps later
 

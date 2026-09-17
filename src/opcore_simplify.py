@@ -16,10 +16,17 @@ recommended/suggested default its own menu already offers wherever one
 exists (blank input already means "use the suggested value" for most of
 them - see _build_answer_table()'s comments for exactly which, and why).
 
-Two kinds of prompt are deliberately answered by a real human instead of a
-canned default, because there's no "recommended" choice to fall back on:
+Three kinds of prompt are deliberately answered by a real human instead of
+a canned default:
+  - Which macOS version to install - OpCore-Simplify prints its own
+    suggested/compatible version and every other option right there in the
+    prompt; press Enter to take the suggestion or type a different one.
+    Not defaulted silently because which macOS version you end up with is
+    exactly the kind of choice a one-click installer shouldn't make for
+    you without asking.
   - Which GPU/WiFi/Bluetooth device to use, on hardware with more than one -
-    picking wrong can mean no video output or no WiFi/BT at all.
+    picking wrong can mean no video output or no WiFi/BT at all. No
+    "recommended" choice exists here to fall back on.
   - Whether to proceed with OpenCore Legacy Patcher - disables SIP/AMFI and
     requires full-installer updates; a real security/stability tradeoff,
     not a build-mechanics default.
@@ -40,10 +47,14 @@ other:
     dump capability of its own, so skipping this crashes that step with
     an AttributeError the moment it tries to read a DSDT that was never
     loaded. dump_acpi_tables() below fetches corpnewt's SSDTTime (MIT) for
-    just its dump_tables() utility (the same non-interactive mechanism
-    acpi_patches.py used before this rewrite) - Windows/Linux only, same
-    platform limitation as everywhere else ACPI dumping comes up in this
-    toolkit (SSDTTime has no macOS dump path either).
+    just its dump_tables() utility on Windows/Linux (SSDTTime has no macOS
+    dump path). On macOS it uses macos_acpi.py instead - real tables read
+    straight from IOKit's own "ACPI Tables" property, not reimplemented or
+    guessed at (same technique Hackintool uses); verified live that the
+    tables it extracts load cleanly through OpCore-Simplify's own
+    unmodified loader and produce a complete, valid EFI build end to end,
+    entirely from macOS. Windows and Linux remain fully supported too -
+    macOS is an addition, not a replacement.
 """
 
 import importlib.util
@@ -54,6 +65,7 @@ import sys
 
 import hardware_report
 import hw_detect
+import macos_acpi
 import net
 
 REPO = 'lzhoang2801/OpCore-Simplify'
@@ -75,9 +87,8 @@ def fetch_tool(workdir):
 
 def dump_acpi_tables(workdir):
     """
-    Windows/Linux only (see module docstring). Returns the folder path
-    containing the dumped .aml tables, or None if unsupported here / the
-    dump failed.
+    Returns the folder path containing the dumped .aml tables, or None if
+    the dump failed.
 
     Unlike this toolkit's old acpi_patches.py, this is NOT optional: reading
     OpCore-Simplify's own OpCore-Simplify.py directly shows selecting a
@@ -85,21 +96,28 @@ def dump_acpi_tables(workdir):
     right afterward, with no way to skip it from the menu. Confirmed live -
     with no tables available, that step doesn't just skip gracefully, it
     loops once ("No valid .aml files were found!") and then hard-crashes
-    with AttributeError. So on macOS, where this can't produce anything (see
-    module docstring), OpCore-Simplify's hardware-report path is not usable
-    at all - not degraded, blocked - unless you already have a real ACPI
-    dump from this same physical machine's Windows/Linux side to supply by
-    hand. This is a real limitation of the tool being integrated, not
-    something this toolkit's own code is choosing not to support.
+    with AttributeError.
+
+    On macOS this uses macos_acpi.py (IOKit's own "ACPI Tables" property on
+    AppleACPIPlatformExpert - real tables, not reimplemented or guessed at;
+    see that module's docstring) instead of SSDTTime, which has no macOS
+    path. Verified live: the tables macos_acpi.py extracts load cleanly
+    through OpCore-Simplify's own unmodified ACPIGuru.read_acpi_tables()
+    and ensure_dsdt() - the exact code path that used to hard-crash here.
+    If macos_acpi.py fails for any reason (a future macOS version hiding
+    this property, e.g.), that's caught and reported the same as a failed
+    Windows/Linux dump, not left to crash the whole build.
     """
-    if hw_detect.host_os() not in ('windows', 'linux'):
-        print()
-        print('!! ACPI table dumping needs Windows or Linux, and this step is NOT optional -')
-        print('!! OpCore-Simplify hard-crashes without real ACPI tables the moment you select')
-        print('!! a hardware report (verified against its own source). Run this from Windows')
-        print('!! or Linux instead, or supply an existing ACPI dump from this same physical')
-        print('!! machine\'s Windows/Linux side if you already have one.')
-        print()
+    osname = hw_detect.host_os()
+
+    if osname == 'macos':
+        try:
+            return macos_acpi.dump_acpi_tables(workdir)
+        except macos_acpi.ACPIExtractionError as e:
+            print(_ACPI_DUMP_FAILED_MESSAGE.format(reason=e))
+            return None
+
+    if osname not in ('windows', 'linux'):
         return None
 
     net.isolate_module_cache('Scripts', 'SSDTTime')
@@ -141,7 +159,8 @@ def _build_answer_table(hardware_report_path, acpi_tables_dir):
          (acpi_tables_dir, None) if acpi_tables_dir else
          (None, 'no ACPI dump is available on this host (see the warning printed earlier)')),
         (re.compile(r'^Please enter the macOS version you want to use \(default: .*\): $'),
-         ('', None)),  # blank = OpCore-Simplify's own suggested/compatible version
+         (None, 'which macOS version to install - press Enter to accept the suggested default shown above, '
+                'or type a number for a different one')),
         (re.compile(r'^Build EFI for UEFI\? \(Yes/no\): $'),
          ('yes', None)),  # matches this toolkit's own README guidance to boot UEFI-only
         (re.compile(r'^Select a .+ (combination|device) \(1-\d+\): $'),
@@ -188,7 +207,7 @@ def _install_auto_answers(tool_dir, hardware_report_path, acpi_tables_dir, picke
             print(f'[one-click] {prompt}{answer}')
             return answer
 
-        if _PRESS_ENTER_RE.match(prompt):
+        if _PRESS_ENTER_RE.match(prompt.strip()):
             return ''
 
         for pattern, (answer, reason) in answer_table:
@@ -311,19 +330,17 @@ def copy_efi(built_efi_dir, efi_mount_path):
     return efi_dest
 
 
-_MACOS_REDIRECT_MESSAGE = """
-This machine is running macOS, and OpCore-Simplify's ACPI step is mandatory
-- dumping real ACPI tables has no macOS path at all (Apple doesn't expose
-raw ACPI tables the way Windows/Linux do, and neither this toolkit's own
-code nor the SSDTTime dependency it uses for this step has a way around
-that - see this module's docstring). This isn't a bug to report; it's a
-real platform limitation, checked here before doing any other work so you
-don't lose time typing in hardware details first.
+_ACPI_DUMP_FAILED_MESSAGE = """
+Couldn't get real ACPI tables from this running macOS: {reason}
 
-Three ways forward:
+macOS is supported here (see macos_acpi.py - it reads the real tables
+straight from AppleACPIPlatformExpert's own "ACPI Tables" property, the
+same technique Hackintool uses, verified live to load cleanly through
+OpenCore-Simplify's own unmodified loader), but that clearly isn't working
+on this particular machine right now. Three ways forward:
   1. Boot a Linux live USB on this same machine - no install needed, just
      boot from it (Ubuntu or Fedora both work) and run this same installer
-     from there. Takes about as long as making the USB itself.
+     from there.
   2. Run this from a Windows or Linux machine instead, if you have one (or
      can borrow one) - even temporarily.
   3. If you already have a real ACPI dump from this same physical
@@ -346,17 +363,22 @@ def parse_acpi_dir_arg(argv):
 
 def check_host_supports_efi_build(acpi_dir_override=None):
     """
-    Raises SystemExit with a clear, actionable explanation if this host
-    can't do the EFI-build stage at all (not Windows/Linux, and no
-    --acpi-dir supplied to work around it). run() calls this itself before
-    doing any real work, but callers that do other things first (like
-    hackintosh_setup.py requiring root before it gets here) should call
-    this even earlier, so nobody's asked for a sudo password just to be
-    told the OS is wrong immediately after.
+    Raises SystemExit if this host genuinely can't do the EFI-build stage -
+    in practice that's only a host that's neither Windows, Linux, nor macOS
+    (hw_detect.host_os() doesn't return anything else, so this is mostly a
+    defensive check) and has no --acpi-dir supplied to work around it.
+    macOS is a real, working path now (see dump_acpi_tables()/macos_acpi.py)
+    - not blocked here the way it used to be. If macOS's own live ACPI
+    extraction fails on a *specific* machine, that's caught later inside
+    dump_acpi_tables() itself with its own actionable message, since
+    whether it'll work can only be known by actually trying it, not by
+    checking the OS name upfront.
     """
-    if not acpi_dir_override and hw_detect.host_os() not in ('windows', 'linux'):
-        print(_MACOS_REDIRECT_MESSAGE)
-        raise SystemExit(1)
+    if acpi_dir_override:
+        return
+    osname = hw_detect.host_os()
+    if osname not in ('windows', 'linux', 'macos'):
+        raise SystemExit(f'Unsupported host OS: {osname!r} - this needs Windows, Linux, or macOS.')
 
 
 def run(workdir, prompt_for_motherboard=True, acpi_dir_override=None):

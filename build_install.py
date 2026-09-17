@@ -37,7 +37,8 @@ SRC_DIR = os.path.join(HERE, 'src')
 # Dependency order matters only for readability here - hackintosh_setup.py
 # still imports the others by name once extracted, so Python's own import
 # system resolves the real order at run time regardless of this list's
-# order.
+# order. If you add/remove/rename an entry here, update the matching
+# root-level ignore list in .gitignore too - see its comment for why.
 MODULES = [
     'hw_detect.py',
     'net.py',
@@ -45,6 +46,7 @@ MODULES = [
     'macrecovery.py',
     'partition.py',
     'write_basesystem.py',
+    'macos_acpi.py',
     'opcore_simplify.py',
     'install_efi.py',
     'imessage.py',

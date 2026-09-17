@@ -2,7 +2,7 @@
 """
 Hackintosh EFI/installer builder - single-file installer.
 
-This is the whole toolkit (hw_detect.py, net.py, hardware_report.py, macrecovery.py, partition.py, write_basesystem.py, opcore_simplify.py, install_efi.py, imessage.py, usb_map.py, cpufriend.py, hackintosh_setup.py) bundled into
+This is the whole toolkit (hw_detect.py, net.py, hardware_report.py, macrecovery.py, partition.py, write_basesystem.py, macos_acpi.py, opcore_simplify.py, install_efi.py, imessage.py, usb_map.py, cpufriend.py, hackintosh_setup.py) bundled into
 one file, so there's just one thing to download and run on Windows, macOS,
 or Linux:
 
@@ -1630,6 +1630,199 @@ if __name__ == '__main__':
         sys.exit(1)
     write(sys.argv[1], sys.argv[2])
 ''',
+    'macos_acpi.py': r'''#!/usr/bin/env python3
+"""
+Dumps real ACPI tables (DSDT/SSDTs) from a running macOS system - the thing
+this toolkit's README used to say had "no macOS path" and SSDTTime (the
+tool opcore_simplify.py uses for this on Windows/Linux) genuinely can't do.
+
+macOS can't, and this module doesn't try to, read raw physical ACPI tables
+the way Linux's /sys/firmware/acpi/tables or Windows' WinRing0-based tools
+do. But it doesn't need to: the AppleACPIPlatformExpert IOKit service
+already has the *parsed* tables sitting in its own "ACPI Tables" property -
+a CFDictionary mapping each table's name ("DSDT", "SSDT", "SSDT-1", ...) to
+its raw bytes as CFData, read via one call to IORegistryEntryCreateCFProperty.
+This is not a novel technique: it's exactly what Hackintool (github.com/
+benbaker76/Hackintool, actively maintained, "the Swiss army knife of
+vanilla Hackintoshing") does for its own "Dump ACPI Tables" feature, read
+directly from its current source (Hackintool/AppDelegate.m,
+-dumpACPITables) rather than guessed at. An old (2014-era, pre-Yosemite)
+technique of getting this same data by parsing `ioreg`'s own text output no
+longer works, which is likely why this toolkit assumed there was no macOS
+path at all - but the underlying property was never removed, only hidden
+from `ioreg`'s default text rendering; the actual IOKit API call still
+returns it.
+
+Verified live against a real, currently-booted Hackintosh (not assumed):
+every extracted DSDT/SSDT had a correct 4-byte ACPI signature, a header
+"Length" field matching the actual byte count exactly, and a checksum
+byte-summing to 0 mod 256 across the whole table, as the ACPI spec
+requires - the same validation OpenCore/any ACPI tool would do. No root
+privileges were needed for the read.
+
+Pure ctypes against IOKit.framework/CoreFoundation.framework - no PyObjC
+dependency (unlike usb_map.py's USBToolBox hand-off, there's no
+`pyobjc-framework-IOKit` package to lean on; the handful of C functions
+needed here are simple enough to bind directly).
+"""
+
+import ctypes
+import ctypes.util
+import os
+import struct
+
+_ACPI_TABLES_PROPERTY = b'ACPI Tables'
+_EXPERT_SERVICE_NAME = b'AppleACPIPlatformExpert'
+_K_CF_STRING_ENCODING_UTF8 = 0x08000100
+_K_IO_MASTER_PORT_DEFAULT = 0
+
+
+class ACPIExtractionError(RuntimeError):
+    """Couldn't get real ACPI tables from this running macOS - caller
+    should treat this the same as "no dump available" (see
+    opcore_simplify.py's dump_acpi_tables()), not crash the whole build."""
+
+
+def _load_frameworks():
+    iokit_path = ctypes.util.find_library('IOKit')
+    cf_path = ctypes.util.find_library('CoreFoundation')
+    if not iokit_path or not cf_path:
+        raise ACPIExtractionError('IOKit/CoreFoundation not found - is this really macOS?')
+
+    iokit = ctypes.CDLL(iokit_path)
+    cf = ctypes.CDLL(cf_path)
+
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32]
+    cf.CFDictionaryGetCount.restype = ctypes.c_long
+    cf.CFDictionaryGetCount.argtypes = [ctypes.c_void_p]
+    cf.CFDictionaryGetKeysAndValues.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    cf.CFStringGetCString.restype = ctypes.c_bool
+    cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_int32]
+    cf.CFDataGetLength.restype = ctypes.c_long
+    cf.CFDataGetLength.argtypes = [ctypes.c_void_p]
+    cf.CFDataGetBytePtr.restype = ctypes.POINTER(ctypes.c_ubyte)
+    cf.CFDataGetBytePtr.argtypes = [ctypes.c_void_p]
+    cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+    iokit.IOServiceMatching.restype = ctypes.c_void_p
+    iokit.IOServiceMatching.argtypes = [ctypes.c_char_p]
+    iokit.IOServiceGetMatchingService.restype = ctypes.c_uint32
+    iokit.IOServiceGetMatchingService.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    iokit.IORegistryEntryCreateCFProperty.restype = ctypes.c_void_p
+    iokit.IORegistryEntryCreateCFProperty.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+    iokit.IOObjectRelease.argtypes = [ctypes.c_uint32]
+
+    return iokit, cf
+
+
+def _validate_table(name, raw):
+    """
+    Raises ACPIExtractionError if raw doesn't look like a genuine, intact
+    ACPI table - same checks any ACPI tool (including OpenCore itself)
+    would make: a real 4-byte signature, a header Length field matching the
+    actual byte count, and a checksum byte-summing to 0 mod 256 across the
+    whole table (ACPI spec, Table 5.4 "System Description Table Header").
+
+    FACS is the one standard exception (verified live, and documented in
+    the ACPI spec) - it has no Checksum field at all, and its content is
+    legitimately mutated by the OS at runtime, so it's excluded from the
+    checksum check here. Not relevant in practice: this module only ever
+    extracts DSDT/SSDT tables (see dump_acpi_tables()), never FACS.
+    """
+    if len(raw) < 36:  # ACPI SDT header is 36 bytes
+        raise ACPIExtractionError(f'{name} is only {len(raw)} bytes - too short to be a real ACPI table.')
+    declared_length = struct.unpack_from('<I', raw, 4)[0]
+    if declared_length != len(raw):
+        raise ACPIExtractionError(
+            f'{name}: header declares {declared_length} bytes but got {len(raw)} - '
+            f'looks truncated or corrupted, not trusting it.'
+        )
+    if name != 'FACS' and (sum(raw) & 0xFF) != 0:
+        raise ACPIExtractionError(f'{name}: checksum does not sum to 0 - looks corrupted, not trusting it.')
+
+
+def dump_acpi_tables(workdir):
+    """
+    Extracts this machine's real DSDT and SSDT tables (matching Hackintool's
+    own filter - other tables like FACP/APIC/HPET aren't what OpenCore-
+    Simplify's ACPI folder needs) into workdir/acpi/, one .aml file per
+    table, named after its own key ("DSDT.aml", "SSDT.aml", "SSDT-1.aml",
+    ...). Returns that folder's path.
+
+    Raises ACPIExtractionError (not caught here) if the AppleACPIPlatformExpert
+    service or its "ACPI Tables" property isn't present, or if any DSDT/SSDT
+    table fails validation (see _validate_table()) - callers should treat
+    that as "no dump available" and fall back accordingly, the same as a
+    failed dump on Windows/Linux, not let it crash the whole build.
+    """
+    iokit, cf = _load_frameworks()
+
+    matching = iokit.IOServiceMatching(_EXPERT_SERVICE_NAME)
+    if not matching:
+        raise ACPIExtractionError('IOServiceMatching("AppleACPIPlatformExpert") failed.')
+
+    service = iokit.IOServiceGetMatchingService(_K_IO_MASTER_PORT_DEFAULT, matching)
+    if not service:
+        raise ACPIExtractionError('AppleACPIPlatformExpert service not found on this machine.')
+
+    try:
+        key = cf.CFStringCreateWithCString(None, _ACPI_TABLES_PROPERTY, _K_CF_STRING_ENCODING_UTF8)
+        try:
+            tables = iokit.IORegistryEntryCreateCFProperty(service, key, None, 0)
+        finally:
+            cf.CFRelease(key)
+
+        if not tables:
+            raise ACPIExtractionError(
+                '"ACPI Tables" property not present on AppleACPIPlatformExpert - '
+                'this macOS version/build may not expose it the way this was verified against.'
+            )
+
+        try:
+            count = cf.CFDictionaryGetCount(tables)
+            keys = (ctypes.c_void_p * count)()
+            values = (ctypes.c_void_p * count)()
+            cf.CFDictionaryGetKeysAndValues(tables, ctypes.cast(keys, ctypes.c_void_p),
+                                             ctypes.cast(values, ctypes.c_void_p))
+
+            dest_dir = os.path.join(workdir, 'acpi')
+            os.makedirs(dest_dir, exist_ok=True)
+
+            name_buf = ctypes.create_string_buffer(64)
+            written = []
+            for i in range(count):
+                cf.CFStringGetCString(keys[i], name_buf, 64, _K_CF_STRING_ENCODING_UTF8)
+                name = name_buf.value.decode('utf-8')
+                if not (name.startswith('DSDT') or name.startswith('SSDT')):
+                    continue
+
+                length = cf.CFDataGetLength(values[i])
+                ptr = cf.CFDataGetBytePtr(values[i])
+                raw = bytes(ctypes.string_at(ptr, length)) if length else b''
+                _validate_table(name, raw)
+
+                dest_path = os.path.join(dest_dir, f'{name}.aml')
+                with open(dest_path, 'wb') as f:
+                    f.write(raw)
+                written.append(name)
+
+            if not written:
+                raise ACPIExtractionError('No DSDT/SSDT entries found in the "ACPI Tables" property.')
+
+            print(f'Extracted {len(written)} real ACPI table(s) from this running macOS: {", ".join(sorted(written))}')
+            return dest_dir
+        finally:
+            cf.CFRelease(tables)
+    finally:
+        iokit.IOObjectRelease(service)
+
+
+if __name__ == '__main__':
+    import sys
+    result = dump_acpi_tables(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+    print(f'ACPI tables written to {result}')
+''',
     'opcore_simplify.py': r'''#!/usr/bin/env python3
 """
 Drives lzhoang2801/OpCore-Simplify (github.com/lzhoang2801/OpCore-Simplify,
@@ -1648,10 +1841,17 @@ recommended/suggested default its own menu already offers wherever one
 exists (blank input already means "use the suggested value" for most of
 them - see _build_answer_table()'s comments for exactly which, and why).
 
-Two kinds of prompt are deliberately answered by a real human instead of a
-canned default, because there's no "recommended" choice to fall back on:
+Three kinds of prompt are deliberately answered by a real human instead of
+a canned default:
+  - Which macOS version to install - OpCore-Simplify prints its own
+    suggested/compatible version and every other option right there in the
+    prompt; press Enter to take the suggestion or type a different one.
+    Not defaulted silently because which macOS version you end up with is
+    exactly the kind of choice a one-click installer shouldn't make for
+    you without asking.
   - Which GPU/WiFi/Bluetooth device to use, on hardware with more than one -
-    picking wrong can mean no video output or no WiFi/BT at all.
+    picking wrong can mean no video output or no WiFi/BT at all. No
+    "recommended" choice exists here to fall back on.
   - Whether to proceed with OpenCore Legacy Patcher - disables SIP/AMFI and
     requires full-installer updates; a real security/stability tradeoff,
     not a build-mechanics default.
@@ -1672,10 +1872,14 @@ other:
     dump capability of its own, so skipping this crashes that step with
     an AttributeError the moment it tries to read a DSDT that was never
     loaded. dump_acpi_tables() below fetches corpnewt's SSDTTime (MIT) for
-    just its dump_tables() utility (the same non-interactive mechanism
-    acpi_patches.py used before this rewrite) - Windows/Linux only, same
-    platform limitation as everywhere else ACPI dumping comes up in this
-    toolkit (SSDTTime has no macOS dump path either).
+    just its dump_tables() utility on Windows/Linux (SSDTTime has no macOS
+    dump path). On macOS it uses macos_acpi.py instead - real tables read
+    straight from IOKit's own "ACPI Tables" property, not reimplemented or
+    guessed at (same technique Hackintool uses); verified live that the
+    tables it extracts load cleanly through OpCore-Simplify's own
+    unmodified loader and produce a complete, valid EFI build end to end,
+    entirely from macOS. Windows and Linux remain fully supported too -
+    macOS is an addition, not a replacement.
 """
 
 import importlib.util
@@ -1686,6 +1890,7 @@ import sys
 
 import hardware_report
 import hw_detect
+import macos_acpi
 import net
 
 REPO = 'lzhoang2801/OpCore-Simplify'
@@ -1707,9 +1912,8 @@ def fetch_tool(workdir):
 
 def dump_acpi_tables(workdir):
     """
-    Windows/Linux only (see module docstring). Returns the folder path
-    containing the dumped .aml tables, or None if unsupported here / the
-    dump failed.
+    Returns the folder path containing the dumped .aml tables, or None if
+    the dump failed.
 
     Unlike this toolkit's old acpi_patches.py, this is NOT optional: reading
     OpCore-Simplify's own OpCore-Simplify.py directly shows selecting a
@@ -1717,21 +1921,28 @@ def dump_acpi_tables(workdir):
     right afterward, with no way to skip it from the menu. Confirmed live -
     with no tables available, that step doesn't just skip gracefully, it
     loops once ("No valid .aml files were found!") and then hard-crashes
-    with AttributeError. So on macOS, where this can't produce anything (see
-    module docstring), OpCore-Simplify's hardware-report path is not usable
-    at all - not degraded, blocked - unless you already have a real ACPI
-    dump from this same physical machine's Windows/Linux side to supply by
-    hand. This is a real limitation of the tool being integrated, not
-    something this toolkit's own code is choosing not to support.
+    with AttributeError.
+
+    On macOS this uses macos_acpi.py (IOKit's own "ACPI Tables" property on
+    AppleACPIPlatformExpert - real tables, not reimplemented or guessed at;
+    see that module's docstring) instead of SSDTTime, which has no macOS
+    path. Verified live: the tables macos_acpi.py extracts load cleanly
+    through OpCore-Simplify's own unmodified ACPIGuru.read_acpi_tables()
+    and ensure_dsdt() - the exact code path that used to hard-crash here.
+    If macos_acpi.py fails for any reason (a future macOS version hiding
+    this property, e.g.), that's caught and reported the same as a failed
+    Windows/Linux dump, not left to crash the whole build.
     """
-    if hw_detect.host_os() not in ('windows', 'linux'):
-        print()
-        print('!! ACPI table dumping needs Windows or Linux, and this step is NOT optional -')
-        print('!! OpCore-Simplify hard-crashes without real ACPI tables the moment you select')
-        print('!! a hardware report (verified against its own source). Run this from Windows')
-        print('!! or Linux instead, or supply an existing ACPI dump from this same physical')
-        print('!! machine\'s Windows/Linux side if you already have one.')
-        print()
+    osname = hw_detect.host_os()
+
+    if osname == 'macos':
+        try:
+            return macos_acpi.dump_acpi_tables(workdir)
+        except macos_acpi.ACPIExtractionError as e:
+            print(_ACPI_DUMP_FAILED_MESSAGE.format(reason=e))
+            return None
+
+    if osname not in ('windows', 'linux'):
         return None
 
     net.isolate_module_cache('Scripts', 'SSDTTime')
@@ -1773,7 +1984,8 @@ def _build_answer_table(hardware_report_path, acpi_tables_dir):
          (acpi_tables_dir, None) if acpi_tables_dir else
          (None, 'no ACPI dump is available on this host (see the warning printed earlier)')),
         (re.compile(r'^Please enter the macOS version you want to use \(default: .*\): $'),
-         ('', None)),  # blank = OpCore-Simplify's own suggested/compatible version
+         (None, 'which macOS version to install - press Enter to accept the suggested default shown above, '
+                'or type a number for a different one')),
         (re.compile(r'^Build EFI for UEFI\? \(Yes/no\): $'),
          ('yes', None)),  # matches this toolkit's own README guidance to boot UEFI-only
         (re.compile(r'^Select a .+ (combination|device) \(1-\d+\): $'),
@@ -1820,7 +2032,7 @@ def _install_auto_answers(tool_dir, hardware_report_path, acpi_tables_dir, picke
             print(f'[one-click] {prompt}{answer}')
             return answer
 
-        if _PRESS_ENTER_RE.match(prompt):
+        if _PRESS_ENTER_RE.match(prompt.strip()):
             return ''
 
         for pattern, (answer, reason) in answer_table:
@@ -1943,19 +2155,17 @@ def copy_efi(built_efi_dir, efi_mount_path):
     return efi_dest
 
 
-_MACOS_REDIRECT_MESSAGE = """
-This machine is running macOS, and OpCore-Simplify's ACPI step is mandatory
-- dumping real ACPI tables has no macOS path at all (Apple doesn't expose
-raw ACPI tables the way Windows/Linux do, and neither this toolkit's own
-code nor the SSDTTime dependency it uses for this step has a way around
-that - see this module's docstring). This isn't a bug to report; it's a
-real platform limitation, checked here before doing any other work so you
-don't lose time typing in hardware details first.
+_ACPI_DUMP_FAILED_MESSAGE = """
+Couldn't get real ACPI tables from this running macOS: {reason}
 
-Three ways forward:
+macOS is supported here (see macos_acpi.py - it reads the real tables
+straight from AppleACPIPlatformExpert's own "ACPI Tables" property, the
+same technique Hackintool uses, verified live to load cleanly through
+OpenCore-Simplify's own unmodified loader), but that clearly isn't working
+on this particular machine right now. Three ways forward:
   1. Boot a Linux live USB on this same machine - no install needed, just
      boot from it (Ubuntu or Fedora both work) and run this same installer
-     from there. Takes about as long as making the USB itself.
+     from there.
   2. Run this from a Windows or Linux machine instead, if you have one (or
      can borrow one) - even temporarily.
   3. If you already have a real ACPI dump from this same physical
@@ -1978,17 +2188,22 @@ def parse_acpi_dir_arg(argv):
 
 def check_host_supports_efi_build(acpi_dir_override=None):
     """
-    Raises SystemExit with a clear, actionable explanation if this host
-    can't do the EFI-build stage at all (not Windows/Linux, and no
-    --acpi-dir supplied to work around it). run() calls this itself before
-    doing any real work, but callers that do other things first (like
-    hackintosh_setup.py requiring root before it gets here) should call
-    this even earlier, so nobody's asked for a sudo password just to be
-    told the OS is wrong immediately after.
+    Raises SystemExit if this host genuinely can't do the EFI-build stage -
+    in practice that's only a host that's neither Windows, Linux, nor macOS
+    (hw_detect.host_os() doesn't return anything else, so this is mostly a
+    defensive check) and has no --acpi-dir supplied to work around it.
+    macOS is a real, working path now (see dump_acpi_tables()/macos_acpi.py)
+    - not blocked here the way it used to be. If macOS's own live ACPI
+    extraction fails on a *specific* machine, that's caught later inside
+    dump_acpi_tables() itself with its own actionable message, since
+    whether it'll work can only be known by actually trying it, not by
+    checking the OS name upfront.
     """
-    if not acpi_dir_override and hw_detect.host_os() not in ('windows', 'linux'):
-        print(_MACOS_REDIRECT_MESSAGE)
-        raise SystemExit(1)
+    if acpi_dir_override:
+        return
+    osname = hw_detect.host_os()
+    if osname not in ('windows', 'linux', 'macos'):
+        raise SystemExit(f'Unsupported host OS: {osname!r} - this needs Windows, Linux, or macOS.')
 
 
 def run(workdir, prompt_for_motherboard=True, acpi_dir_override=None):
@@ -3003,25 +3218,27 @@ if __name__ == '__main__':
 """
 Hackintosh EFI/installer builder - main entry point, one-click by default.
 
-Runs on Windows or Linux (see opcore_simplify.py for why macOS can't run
-the EFI-build stage - checked immediately on startup, before the root/
-Administrator prompt or any hardware questions, so a macOS run fails fast
-with a clear explanation instead of wasting your time first). If you
-already have a real ACPI dump from this same physical machine's Windows/
-Linux side, pass it with --acpi-dir <path> to run the rest from macOS
-anyway - see opcore_simplify.py's module docstring. Walks through, with no
-keypresses needed for the ordinary case:
+Runs on Windows, Linux, or macOS - including the EFI-build stage, which
+used to need Windows/Linux for real ACPI tables; macos_acpi.py now gets
+those straight from IOKit instead (see opcore_simplify.py's module
+docstring for how, and how it was verified). If that ever fails on a
+specific machine, or you already have a real ACPI dump from elsewhere, pass
+it with --acpi-dir <path>. Walks through, with no keypresses needed for the
+ordinary case:
   1. Build a hardware report for this machine (hardware_report.py) and
      drive OpCore-Simplify's own menu end to end, answering its prompts
      with its own recommended defaults - compatibility checking, ACPI
      patches, kext selection, and SMBIOS are all OpCore-Simplify's own
      tested logic, just no longer typed in by hand (opcore_simplify.py).
-     Two kinds of question still stop for a real answer: which GPU/WiFi/
-     Bluetooth device to use on hardware with more than one, and whether to
-     accept OpenCore Legacy Patcher's SIP/AMFI tradeoff - see
-     opcore_simplify.py's module docstring for why those aren't defaulted.
-  2. Fetch the Recovery/BaseSystem image for whichever macOS version
-     OpCore-Simplify picked, straight from Apple (macrecovery.py).
+     Three kinds of question still stop for a real answer: which macOS
+     version to install (OpenCore-Simplify's own menu, defaulting to its
+     suggested version on a bare Enter), which GPU/WiFi/Bluetooth device to
+     use on hardware with more than one, and whether to accept OpenCore
+     Legacy Patcher's SIP/AMFI tradeoff - see opcore_simplify.py's module
+     docstring for why those aren't silently defaulted.
+  2. Fetch the Recovery/BaseSystem image for whichever macOS version you
+     picked, straight from Apple (macrecovery.py) - no need to say which
+     one again, it's captured directly from what you answered above.
   3. Auto-detect a USB/SD card already plugged in (or wait for one if none
      is), partition it (EFI System Partition + a partition for the
      BaseSystem image), and write the image on. If exactly one USB/SD
@@ -3124,14 +3341,24 @@ def choose_macos_version_fetched():
         print('Not one of the listed Darwin version numbers, try again.')
 
 
-def _pick_from(disks):
+def _pick_from(disks, default_id=None):
+    """
+    Shows disks and asks which one to use - the disk-selection analog of
+    opcore_simplify.py's macOS-version prompt: press Enter to take
+    default_id (only ever set when there's exactly one candidate, so
+    "the default" is unambiguous), or type a different listed identifier.
+    With no default_id, an explicit identifier is required.
+    """
     print()
     for d in disks:
-        print(f'  {d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]})')
+        marker = '  <- default (press Enter to use this)' if d['id'] == default_id else ''
+        print(f'  {d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]}){marker}')
     print()
     ids = {d['id'] for d in disks}
+    prompt = 'Type the identifier of the disk to use as the installer target'
+    prompt += f' (default: {default_id}): ' if default_id else ': '
     while True:
-        chosen = input('Type the identifier of the disk to use as the installer target: ').strip()
+        chosen = input(prompt).strip() or default_id
         if chosen in ids:
             disk = next(d for d in disks if d['id'] == chosen)
             return disk['id'], disk['label'], disk['size_gib']
@@ -3145,41 +3372,33 @@ def choose_disk():
     docstring for why that flag alone isn't trustworthy on Hackintosh
     hardware).
 
+    Always shows what's detected and asks - never silently auto-picks
+    without you seeing and confirming it, even when there's only one
+    candidate (then it's just a default you can accept with Enter, the
+    same pattern as OpCore-Simplify's own macOS-version prompt).
+
     Returns (disk_id, label, size_gib, auto_confirmed). auto_confirmed is
-    True only when exactly one USB/SD device was found already connected -
-    the one case main() lets confirm_and_wipe() skip typing the
-    confirmation back (see its docstring). Zero or multiple candidates
-    always fall back to picking/confirming by hand, since there's no safe
-    default for "which disk".
+    True only when exactly one USB/SD device was found - the one case
+    main() lets confirm_and_wipe() use a countdown instead of typing the
+    disk identifier back a second time, since you already just confirmed
+    it here. Zero or multiple candidates always fall back to the full
+    typed confirmation, since there's no single obvious disk to have
+    already confirmed.
     """
     already = partition.list_removable_disks()
-    if len(already) == 1:
-        d = already[0]
+
+    if not already:
         print()
-        print(f'Auto-detected the only connected USB/SD device: '
-              f'{d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]})')
-        return d['id'], d['label'], d['size_gib'], True
+        print('No USB/SD media detected.')
+        input('Plug in the USB drive or SD card to use as the installer target, then press Enter...')
+        already = partition.list_removable_disks()
 
-    if len(already) > 1:
+    if already:
         print()
-        print('Multiple USB/SD devices are already connected - pick the right one:')
-        disk_id, label, size_gib = _pick_from(already)
-        return disk_id, label, size_gib, False
-
-    print()
-    print('No USB/SD media detected.')
-    input('Plug in the USB drive or SD card to use as the installer target, then press Enter...')
-    after = partition.list_removable_disks()
-
-    if len(after) == 1:
-        d = after[0]
-        print(f'Detected: {d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]})')
-        return d['id'], d['label'], d['size_gib'], True
-
-    if len(after) > 1:
-        print('Detected more than one device - pick the right one:')
-        disk_id, label, size_gib = _pick_from(after)
-        return disk_id, label, size_gib, False
+        print('USB/SD device(s) detected:' if len(already) > 1 else 'USB/SD device detected:')
+        default_id = already[0]['id'] if len(already) == 1 else None
+        disk_id, label, size_gib = _pick_from(already, default_id=default_id)
+        return disk_id, label, size_gib, len(already) == 1
 
     print('No USB/SD media detected at all. Falling back to the full disk list -')
     print('BE CAREFUL: this includes internal drives. Only proceed if you know exactly')
@@ -3207,11 +3426,11 @@ def main():
     print(f'Logging this session to {log_path}')
 
     # Checked before *anything* else, including the banner and the root/
-    # Administrator check right after it - this can't be worked around by
-    # elevating, and there's no reason to ask for a sudo password (or make
-    # someone type in hardware details) on a host that's about to fail
-    # right after anyway. See opcore_simplify.py's own docstring for why
-    # this specific check can't just be deferred to later.
+    # Administrator check right after it - genuinely unsupported hosts (not
+    # Windows/Linux/macOS) can't be worked around by elevating, so there's
+    # no reason to ask for a sudo password first. Windows, Linux, and macOS
+    # are all real, working paths now (see opcore_simplify.py's docstring) -
+    # this mostly just parses --acpi-dir for later.
     acpi_dir_override = opcore_simplify.parse_acpi_dir_arg(sys.argv[1:])
     opcore_simplify.check_host_supports_efi_build(acpi_dir_override)
 

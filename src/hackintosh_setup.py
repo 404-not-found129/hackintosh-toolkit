@@ -2,25 +2,27 @@
 """
 Hackintosh EFI/installer builder - main entry point, one-click by default.
 
-Runs on Windows or Linux (see opcore_simplify.py for why macOS can't run
-the EFI-build stage - checked immediately on startup, before the root/
-Administrator prompt or any hardware questions, so a macOS run fails fast
-with a clear explanation instead of wasting your time first). If you
-already have a real ACPI dump from this same physical machine's Windows/
-Linux side, pass it with --acpi-dir <path> to run the rest from macOS
-anyway - see opcore_simplify.py's module docstring. Walks through, with no
-keypresses needed for the ordinary case:
+Runs on Windows, Linux, or macOS - including the EFI-build stage, which
+used to need Windows/Linux for real ACPI tables; macos_acpi.py now gets
+those straight from IOKit instead (see opcore_simplify.py's module
+docstring for how, and how it was verified). If that ever fails on a
+specific machine, or you already have a real ACPI dump from elsewhere, pass
+it with --acpi-dir <path>. Walks through, with no keypresses needed for the
+ordinary case:
   1. Build a hardware report for this machine (hardware_report.py) and
      drive OpCore-Simplify's own menu end to end, answering its prompts
      with its own recommended defaults - compatibility checking, ACPI
      patches, kext selection, and SMBIOS are all OpCore-Simplify's own
      tested logic, just no longer typed in by hand (opcore_simplify.py).
-     Two kinds of question still stop for a real answer: which GPU/WiFi/
-     Bluetooth device to use on hardware with more than one, and whether to
-     accept OpenCore Legacy Patcher's SIP/AMFI tradeoff - see
-     opcore_simplify.py's module docstring for why those aren't defaulted.
-  2. Fetch the Recovery/BaseSystem image for whichever macOS version
-     OpCore-Simplify picked, straight from Apple (macrecovery.py).
+     Three kinds of question still stop for a real answer: which macOS
+     version to install (OpenCore-Simplify's own menu, defaulting to its
+     suggested version on a bare Enter), which GPU/WiFi/Bluetooth device to
+     use on hardware with more than one, and whether to accept OpenCore
+     Legacy Patcher's SIP/AMFI tradeoff - see opcore_simplify.py's module
+     docstring for why those aren't silently defaulted.
+  2. Fetch the Recovery/BaseSystem image for whichever macOS version you
+     picked, straight from Apple (macrecovery.py) - no need to say which
+     one again, it's captured directly from what you answered above.
   3. Auto-detect a USB/SD card already plugged in (or wait for one if none
      is), partition it (EFI System Partition + a partition for the
      BaseSystem image), and write the image on. If exactly one USB/SD
@@ -123,14 +125,24 @@ def choose_macos_version_fetched():
         print('Not one of the listed Darwin version numbers, try again.')
 
 
-def _pick_from(disks):
+def _pick_from(disks, default_id=None):
+    """
+    Shows disks and asks which one to use - the disk-selection analog of
+    opcore_simplify.py's macOS-version prompt: press Enter to take
+    default_id (only ever set when there's exactly one candidate, so
+    "the default" is unambiguous), or type a different listed identifier.
+    With no default_id, an explicit identifier is required.
+    """
     print()
     for d in disks:
-        print(f'  {d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]})')
+        marker = '  <- default (press Enter to use this)' if d['id'] == default_id else ''
+        print(f'  {d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]}){marker}')
     print()
     ids = {d['id'] for d in disks}
+    prompt = 'Type the identifier of the disk to use as the installer target'
+    prompt += f' (default: {default_id}): ' if default_id else ': '
     while True:
-        chosen = input('Type the identifier of the disk to use as the installer target: ').strip()
+        chosen = input(prompt).strip() or default_id
         if chosen in ids:
             disk = next(d for d in disks if d['id'] == chosen)
             return disk['id'], disk['label'], disk['size_gib']
@@ -144,41 +156,33 @@ def choose_disk():
     docstring for why that flag alone isn't trustworthy on Hackintosh
     hardware).
 
+    Always shows what's detected and asks - never silently auto-picks
+    without you seeing and confirming it, even when there's only one
+    candidate (then it's just a default you can accept with Enter, the
+    same pattern as OpCore-Simplify's own macOS-version prompt).
+
     Returns (disk_id, label, size_gib, auto_confirmed). auto_confirmed is
-    True only when exactly one USB/SD device was found already connected -
-    the one case main() lets confirm_and_wipe() skip typing the
-    confirmation back (see its docstring). Zero or multiple candidates
-    always fall back to picking/confirming by hand, since there's no safe
-    default for "which disk".
+    True only when exactly one USB/SD device was found - the one case
+    main() lets confirm_and_wipe() use a countdown instead of typing the
+    disk identifier back a second time, since you already just confirmed
+    it here. Zero or multiple candidates always fall back to the full
+    typed confirmation, since there's no single obvious disk to have
+    already confirmed.
     """
     already = partition.list_removable_disks()
-    if len(already) == 1:
-        d = already[0]
+
+    if not already:
         print()
-        print(f'Auto-detected the only connected USB/SD device: '
-              f'{d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]})')
-        return d['id'], d['label'], d['size_gib'], True
+        print('No USB/SD media detected.')
+        input('Plug in the USB drive or SD card to use as the installer target, then press Enter...')
+        already = partition.list_removable_disks()
 
-    if len(already) > 1:
+    if already:
         print()
-        print('Multiple USB/SD devices are already connected - pick the right one:')
-        disk_id, label, size_gib = _pick_from(already)
-        return disk_id, label, size_gib, False
-
-    print()
-    print('No USB/SD media detected.')
-    input('Plug in the USB drive or SD card to use as the installer target, then press Enter...')
-    after = partition.list_removable_disks()
-
-    if len(after) == 1:
-        d = after[0]
-        print(f'Detected: {d["id"]}  -  {d["size_gib"]} GiB  -  {d["label"]}  ({d["bus"]})')
-        return d['id'], d['label'], d['size_gib'], True
-
-    if len(after) > 1:
-        print('Detected more than one device - pick the right one:')
-        disk_id, label, size_gib = _pick_from(after)
-        return disk_id, label, size_gib, False
+        print('USB/SD device(s) detected:' if len(already) > 1 else 'USB/SD device detected:')
+        default_id = already[0]['id'] if len(already) == 1 else None
+        disk_id, label, size_gib = _pick_from(already, default_id=default_id)
+        return disk_id, label, size_gib, len(already) == 1
 
     print('No USB/SD media detected at all. Falling back to the full disk list -')
     print('BE CAREFUL: this includes internal drives. Only proceed if you know exactly')
@@ -206,11 +210,11 @@ def main():
     print(f'Logging this session to {log_path}')
 
     # Checked before *anything* else, including the banner and the root/
-    # Administrator check right after it - this can't be worked around by
-    # elevating, and there's no reason to ask for a sudo password (or make
-    # someone type in hardware details) on a host that's about to fail
-    # right after anyway. See opcore_simplify.py's own docstring for why
-    # this specific check can't just be deferred to later.
+    # Administrator check right after it - genuinely unsupported hosts (not
+    # Windows/Linux/macOS) can't be worked around by elevating, so there's
+    # no reason to ask for a sudo password first. Windows, Linux, and macOS
+    # are all real, working paths now (see opcore_simplify.py's docstring) -
+    # this mostly just parses --acpi-dir for later.
     acpi_dir_override = opcore_simplify.parse_acpi_dir_arg(sys.argv[1:])
     opcore_simplify.check_host_supports_efi_build(acpi_dir_override)
 
