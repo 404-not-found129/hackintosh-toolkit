@@ -135,6 +135,33 @@ def list_removable_disks():
     return [d for d in list_disks() if d['removable']]
 
 
+def verify_disk_still_matches(disk_id, expected_label, expected_size_gib):
+    """Re-checks disk_id right before the actual wipe and raises SystemExit
+    if it no longer matches what the operator confirmed earlier. backup_
+    existing_data() can now take real time (copying however much was
+    already on the disk) between confirm_and_wipe() and create_partitions()
+    - previously a near-instantaneous gap - widening the window in which a
+    disk identifier could in principle get reused for a different physical
+    device (a user unplugging the confirmed drive and plugging in another
+    one during a slow backup; disk_id being reissued by the OS to the new
+    device before create_partitions() runs). Comparing label/size here
+    doesn't guarantee it's still physically the same drive, but it catches
+    the realistic case - a different device would essentially never happen
+    to report the exact same label and size - without adding a serial-
+    number lookup this toolkit doesn't otherwise need."""
+    current = next((d for d in list_disks() if d['id'] == disk_id), None)
+    if current is None:
+        raise SystemExit(f'{disk_id} is no longer present - it may have been unplugged. Aborting '
+                          f'before wiping anything; re-run this tool and reconnect the disk.')
+    if current['label'] != expected_label or current['size_gib'] != expected_size_gib:
+        raise SystemExit(
+            f'{disk_id} no longer matches what you confirmed - it was "{expected_label}" '
+            f'({expected_size_gib} GiB), now reports "{current["label"]}" ({current["size_gib"]} GiB). '
+            f'It may have been unplugged and a different device reassigned this identifier. '
+            f'Aborting before wiping anything; re-run this tool to confirm the disk again.'
+        )
+
+
 MIN_RECOMMENDED_GIB = 14  # BaseSystem + EFI + working room; below this, warn but don't block
 
 
@@ -181,14 +208,25 @@ def _dir_size(path):
     return total
 
 
-def _backup_one_volume(mount_point, dest_dir, label):
+def _backup_one_volume(mount_point, dest_dir, label, used_hint=None):
     """Copies mount_point's contents into dest_dir. Returns bytes actually
     copied (0 if the volume was empty or the backup was skipped). Checks
     free space at the backup destination against what's used on the source
     volume first - same reasoning as macrecovery.py's disk-space guard on
     the Recovery download: fail before writing anything instead of partway
-    through a large copy."""
-    used = shutil.disk_usage(mount_point).used
+    through a large copy.
+
+    used_hint overrides shutil.disk_usage(mount_point).used for the "how
+    much needs to fit" figure - needed for an APFS volume: confirmed live
+    that shutil.disk_usage() on any volume in a shared APFS container
+    reports the whole CONTAINER's used space (all sibling volumes
+    combined), not that specific volume's own footprint, since APFS
+    volumes share one dynamically-allocated pool. Without this, backing up
+    a small volume sharing a container with a much larger one would
+    spuriously fail this check against the wrong (much bigger) number.
+    _resolve_apfs_container_volumes() supplies the real per-volume figure
+    from diskutil's own reported CapacityInUse instead."""
+    used = used_hint if used_hint is not None else shutil.disk_usage(mount_point).used
     backup_root = os.path.dirname(os.path.abspath(dest_dir))
     os.makedirs(backup_root, exist_ok=True)
     free = shutil.disk_usage(backup_root).free
@@ -240,7 +278,7 @@ def backup_existing_data(disk_id, backup_dir):
         return None
 
 
-def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir):
+def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir, used_hint=None):
     dest = os.path.join(backup_dir, label)
     if os.path.exists(dest):
         # Two partitions on the same disk can genuinely share a label - not
@@ -254,7 +292,7 @@ def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir)
         dest = f'{dest}_{suffix}'
     print(f'Checking {mount_point} ("{label}") for existing data to back up...')
     try:
-        copied = _backup_one_volume(mount_point, dest, label)
+        copied = _backup_one_volume(mount_point, dest, label, used_hint=used_hint)
         if copied:
             print(f'  Backed up {copied / 2**20:.1f} MB to {dest}')
         else:
@@ -284,12 +322,18 @@ def _resolve_apfs_container_volumes(container_partition_id, all_disks_and_partit
     "DeviceIdentifier" in this global `diskutil list` view, vs. the
     differently-shaped "APFSPhysicalStore" key `diskutil info` on a single
     disk returns) were confirmed exactly, not assumed to match.
-    Returns [(volume_id, volume_label)], or [] if nothing resolved (a
-    container disk-utility itself failed to report, e.g.)."""
+    Returns [(volume_id, volume_label, capacity_in_use)], or [] if nothing
+    resolved (a container disk-utility itself failed to report, e.g.).
+    capacity_in_use is that specific volume's own real usage (diskutil's
+    own "CapacityInUse", confirmed live to differ per volume even though
+    they share one container) - _backup_one_volume() needs this instead of
+    shutil.disk_usage(), which reports the whole container's shared usage
+    for any volume mounted from it, not this one volume's own footprint."""
     for d in all_disks_and_partitions:
         stores = d.get('APFSPhysicalStores') or []
         if any(s.get('DeviceIdentifier') == container_partition_id for s in stores):
-            return [(v['DeviceIdentifier'], v.get('VolumeName')) for v in d.get('APFSVolumes', [])]
+            return [(v['DeviceIdentifier'], v.get('VolumeName'), v.get('CapacityInUse'))
+                    for v in d.get('APFSVolumes', [])]
     return []
 
 
@@ -314,7 +358,8 @@ def _backup_existing_data_macos(disk_id, backup_dir):
     for p in partitions:
         if p.get('Content') == 'Apple_APFS':
             volumes = _resolve_apfs_container_volumes(p['DeviceIdentifier'], all_disks_and_partitions)
-            expanded.extend({'DeviceIdentifier': vid, 'VolumeName': vname} for vid, vname in volumes)
+            expanded.extend({'DeviceIdentifier': vid, 'VolumeName': vname, 'CapacityInUse': cap}
+                             for vid, vname, cap in volumes)
             if not volumes:
                 print(f'{p["DeviceIdentifier"]} is an APFS container but its volumes could not be '
                       f'resolved - skipping (unsupported/corrupt container, or nothing in it).')
@@ -338,11 +383,18 @@ def _backup_existing_data_macos(disk_id, backup_dir):
             we_mounted_it = True
             mount_point = _diskutil_info(part_id).get('MountPoint')
             if not mount_point:
+                # diskutil mount reported success but hasn't registered a
+                # MountPoint yet (seen with slow-to-register filesystems) -
+                # we did mount it, so undo that before skipping, rather than
+                # silently leaving it mounted with nothing printed.
+                print(f'{part_id} ("{label}") mounted but reported no MountPoint - skipping, '
+                      f'and unmounting it again.')
+                _run(['diskutil', 'unmount', part_id], check=False, quiet=True)
                 continue
 
         copied = _backup_partition(mount_point, we_mounted_it,
                                     lambda pid=part_id: _run(['diskutil', 'unmount', pid], check=False, quiet=True),
-                                    label, backup_dir)
+                                    label, backup_dir, used_hint=part.get('CapacityInUse'))
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
@@ -369,11 +421,15 @@ def _backup_existing_data_linux(disk_id, backup_dir):
     backed_up_any = False
     for part in partitions:
         name = part.get('name')
+        if not name:
+            continue  # malformed lsblk entry - nothing to even reference
         fstype = part.get('fstype')
-        if not name or not fstype:
-            continue  # no filesystem on this entry - nothing to read
-        part_path = f'/dev/{name}'
         label = part.get('label') or name
+        if not fstype:
+            print(f'/dev/{name} ("{label}") has no filesystem lsblk can identify - skipping '
+                  f'(unsupported/corrupt filesystem, or nothing there to read).')
+            continue
+        part_path = f'/dev/{name}'
         mount_point = part.get('mountpoint')
         we_mounted_it = False
         if not mount_point:
@@ -415,6 +471,18 @@ def _backup_existing_data_windows(disk_id, backup_dir):
     for part in data:
         letter = part.get('DriveLetter')
         part_number = part.get('PartitionNumber')
+        if isinstance(letter, int):
+            # Get-Partition's DriveLetter is a System.Char; PowerShell's
+            # ConvertTo-Json serializes System.Char as its integer code
+            # point (e.g. 67 for 'C'), not a one-character string - a
+            # documented PowerShell/.NET JSON gotcha. Confirmed: without
+            # this, `letter` would be the int 67, "not letter" would be
+            # False (a nonzero int is truthy), and mount_point below would
+            # become the invalid path "67:\\" instead of "C:\\", silently
+            # failing every lettered partition's backup. chr(0) (no letter
+            # assigned) becomes '\x00', matching the same sentinel the
+            # string form already checks for below.
+            letter = chr(letter)
         if not letter or letter in ('\x00',):
             print(f'Partition {part_number} on disk {disk_id} has no drive letter assigned - '
                   f'skipping (can\'t read it without one).')

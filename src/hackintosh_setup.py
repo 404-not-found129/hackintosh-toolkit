@@ -46,6 +46,7 @@ step, the BIOS settings you still have to set by hand).
 
 import datetime
 import os
+import shutil
 import sys
 import time
 
@@ -289,6 +290,22 @@ def main():
     else:
         print('Nothing worth backing up was found on this disk (blank, or nothing readable).')
 
+    # A large backup can eat most of the free space at WORKDIR's own
+    # filesystem, which the upcoming macOS Recovery download also needs -
+    # both checks are individually correct, but failing here (right after
+    # the backup that used the space) is a far more useful moment than
+    # failing several minutes later after also partitioning the disk.
+    free_gib = shutil.disk_usage(WORKDIR).free / (1024 ** 3)
+    if free_gib < 4:
+        print(f'Only {free_gib:.1f} GB free at {WORKDIR} now - the macOS image download coming up '
+              f'needs 0.5-2GB+ and may not fit. Free up space now if you want to avoid that failing '
+              f'partway through the rest of this run.')
+
+    # backup_existing_data() can take real time on a disk with a lot of
+    # existing data - confirm the disk this operator approved earlier is
+    # still the same physical device before actually wiping it.
+    partition.verify_disk_still_matches(disk_id, label, size_gib)
+
     print()
     print('== Partitioning ==')
     efi_part, target_part = partition.create_partitions(disk_id)
@@ -348,12 +365,17 @@ def main():
         print('    run cpufriend.py against the EFI partition to generate')
         print('    CPUFriendDataProvider.kext (make sure CPUFriend.kext is present first).')
     if backed_up_to:
-        print(f'  - Whatever was on {disk_id} before is backed up at {backed_up_to}')
+        print(f'  - Whatever was on {disk_id} before is backed up at {backed_up_to} - move it')
+        print('    somewhere safe before clearing out working files below.')
     print('=' * 70)
     print(f'Total time: {_format_duration(time.time() - start_time)}.')
     print(f'Working files ({_workdir_size_gib():.1f} GB) are kept in {WORKDIR} - the downloaded')
-    print('macOS image there is reused (after re-verifying it) next time you pick the same')
-    print('version, so it\'s worth keeping; delete the whole folder any time to reclaim the space.')
+    print('macOS image there is reused (after re-verifying it) next time you pick the same version,')
+    if backed_up_to:
+        print(f'so it\'s worth keeping. {backed_up_to} is inside this same folder, though - copy it')
+        print('out first if you want to keep it; deleting the whole folder deletes that too.')
+    else:
+        print('so it\'s worth keeping; delete the whole folder any time to reclaim the space.')
     print('=' * 70)
 
 

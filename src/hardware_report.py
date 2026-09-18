@@ -303,8 +303,17 @@ def _amd_codename(brand):
     if not match:
         return None
     generation_digit, _model_rest, suffix = match.groups()
-    if 'G' in suffix.upper():
-        return None  # APU - different silicon/codename per generation, not this table
+    suffix_upper = suffix.upper()
+    if any(c in suffix_upper for c in 'GHU'):
+        # G = APU (5600G); H/HS/HX, U = mobile-only suffixes (7945HX3D,
+        # 5500U, ...) - confirmed live that widening the suffix class to
+        # [A-Z0-9]* for the desktop X3D fix (see comment above) also made
+        # this regex match mobile "HX3D" chips like the Ryzen 9 7945HX3D,
+        # which would otherwise have returned 'Unknown' (no \b boundary
+        # match) and now returns the wrong desktop codename instead. None
+        # of AMD's desktop suffixes (X, XT, T, F, ...) contain G/H/U, so
+        # this only excludes APU/mobile parts, not real desktop ones.
+        return None
     for prefix, codename in RYZEN_DESKTOP_GENERATION:
         if generation_digit == prefix:
             return codename

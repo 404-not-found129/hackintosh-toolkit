@@ -220,37 +220,62 @@ def download_recovery(version, outdir):
 
     Names the saved files after the requested Darwin version (not the fixed
     "BaseSystem.dmg"/"BaseSystem.chunklist" this used before) and reuses them
-    across runs if they're already there and still verify - outdir is a
-    fixed, across-run-reused path (hackintosh_setup.py's WORKDIR), and this
-    exact user's own workflow already involves re-running the installer
-    multiple times over several days while iterating on a build. A generic
-    releases image is immutable once Apple publishes it for a given version,
-    unlike OpCore-Simplify's own source (see net.py's fetch_repo_source_zip
-    docstring for why *that* one is wiped fresh every run instead) - so
-    caching this one is safe, and re-downloading a multi-hundred-MB-to-2GB+
-    image on every retry when nothing about the macOS version choice changed
-    is pure wasted time/bandwidth. Falls back to a fresh download whenever
-    a cached copy is missing or fails verification - never trusts a cached
-    file blindly.
+    across runs if they're still the same build Apple is currently offering -
+    outdir is a fixed, across-run-reused path (hackintosh_setup.py's
+    WORKDIR), and this exact user's own workflow already involves re-running
+    the installer multiple times over several days while iterating on a
+    build, so re-downloading a multi-hundred-MB-to-2GB+ image every retry
+    when nothing changed is pure wasted time/bandwidth.
+
+    Always asks Apple for the current image info first (a cheap metadata
+    request - the same one this function always made before caching
+    existed) rather than trusting a cached file's mere existence: a
+    "default" os_type entry really is the fixed build a board originally
+    shipped with, but MACOS_VERSIONS' own "latest" entries (Monterey
+    onward) are explicitly documented as "the newest build Apple currently
+    offers" - a moving target that changes when Apple ships a new recovery
+    build (e.g. after a security update), not an immutable file. A cached
+    copy that still verifies against its own chunklist only proves it
+    wasn't corrupted, not that it's still what Apple is offering right now
+    - so the actual product id Apple just returned is compared against the
+    one saved alongside the cache from the run that downloaded it, and only
+    a match skips the expensive re-download. Falls back to a fresh download
+    whenever nothing's cached, the product id doesn't match, or the cached
+    copy fails verification - never trusts a cached file blindly.
     """
     cnkpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.chunklist')
     dmgpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.dmg')
-    if os.path.isfile(cnkpath) and os.path.isfile(dmgpath):
-        print(f'Found a previously-downloaded {version["name"]} image in {outdir} - verifying before reusing it...')
+    product_marker = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.product')
+
+    print(f'Requesting {version["name"]} Internet Recovery image from Apple (board-id {version["board_id"]})...')
+    session = _get_session()
+    info = _get_image_info(session, version['board_id'], version['mlb'], version['os_type'])
+    print(f'Apple offered product {info[INFO_PRODUCT]}')
+
+    try:
+        with open(product_marker) as f:
+            cached_product = f.read().strip()
+    except OSError:
+        cached_product = None
+
+    if cached_product == info[INFO_PRODUCT] and os.path.isfile(cnkpath) and os.path.isfile(dmgpath):
+        print(f'Already have this exact build ({info[INFO_PRODUCT]}) cached in {outdir} - '
+              f'verifying before reusing it...')
         try:
             _verify_image(dmgpath, cnkpath)
             print('Still verifies OK - skipping re-download.')
             return dmgpath
         except Exception as e:
             print(f'Cached copy failed verification ({e}) - downloading fresh instead.')
+    elif cached_product is not None:
+        print(f'A cached {version["name"]} image exists but Apple is now offering a different '
+              f'build ({cached_product} -> {info[INFO_PRODUCT]}) - downloading the current one.')
 
-    print(f'Requesting {version["name"]} Internet Recovery image from Apple (board-id {version["board_id"]})...')
-    session = _get_session()
-    info = _get_image_info(session, version['board_id'], version['mlb'], version['os_type'])
-    print(f'Apple offered product {info[INFO_PRODUCT]}')
     cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], f'BaseSystem-{version["darwin"]}.chunklist', outdir)
     dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], f'BaseSystem-{version["darwin"]}.dmg', outdir)
     _verify_image(dmgpath, cnkpath)
+    with open(product_marker, 'w') as f:
+        f.write(info[INFO_PRODUCT])
     return dmgpath
 
 
