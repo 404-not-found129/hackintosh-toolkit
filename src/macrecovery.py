@@ -27,6 +27,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
+import net
+
 MLB_ZERO = '00000000000000000'
 
 TYPE_SID = 16
@@ -88,7 +90,9 @@ def _run_query(url, headers, post=None, raw=False):
         # confirmed live, this used to surface as a raw traceback reading
         # "[Errno 8] nodename nor servname provided, or not known", which
         # means nothing to anyone who isn't already a Python programmer.
-        raise RuntimeError(f'Could not reach {url} ({e.reason}) - check your internet connection and try again.') from e
+        # Reuses net.py's own message for this same case instead of a second,
+        # independently-worded copy - the two used to say the same thing.
+        raise RuntimeError(net._friendly_url_error(e, url)) from e
     if raw:
         return response
     return dict(response.info()), response.read()
@@ -243,9 +247,11 @@ def download_recovery(version, outdir):
     whenever nothing's cached, the product id doesn't match, or the cached
     copy fails verification - never trusts a cached file blindly.
     """
-    cnkpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.chunklist')
-    dmgpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.dmg')
-    product_marker = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.product')
+    base_name = f'BaseSystem-{version["darwin"]}'
+    cnk_name, dmg_name = f'{base_name}.chunklist', f'{base_name}.dmg'
+    cnkpath = os.path.join(outdir, cnk_name)
+    dmgpath = os.path.join(outdir, dmg_name)
+    product_marker = os.path.join(outdir, f'{base_name}.product')
 
     print(f'Requesting {version["name"]} Internet Recovery image from Apple (board-id {version["board_id"]})...')
     session = _get_session()
@@ -271,8 +277,8 @@ def download_recovery(version, outdir):
         print(f'A cached {version["name"]} image exists but Apple is now offering a different '
               f'build ({cached_product} -> {info[INFO_PRODUCT]}) - downloading the current one.')
 
-    cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], f'BaseSystem-{version["darwin"]}.chunklist', outdir)
-    dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], f'BaseSystem-{version["darwin"]}.dmg', outdir)
+    cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], cnk_name, outdir)
+    dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], dmg_name, outdir)
     _verify_image(dmgpath, cnkpath)
     with open(product_marker, 'w') as f:
         f.write(info[INFO_PRODUCT])

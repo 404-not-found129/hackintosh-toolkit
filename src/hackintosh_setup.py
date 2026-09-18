@@ -223,14 +223,7 @@ def _format_duration(seconds):
 
 
 def _workdir_size_gib():
-    total = 0
-    for base, _dirs, files in os.walk(WORKDIR):
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(base, name))
-            except OSError:
-                pass
-    return total / (1024 ** 3)
+    return partition.dir_size(WORKDIR) / (1024 ** 3)
 
 
 def main():

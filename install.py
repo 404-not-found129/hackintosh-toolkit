@@ -1267,6 +1267,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
+import net
+
 MLB_ZERO = '00000000000000000'
 
 TYPE_SID = 16
@@ -1328,7 +1330,9 @@ def _run_query(url, headers, post=None, raw=False):
         # confirmed live, this used to surface as a raw traceback reading
         # "[Errno 8] nodename nor servname provided, or not known", which
         # means nothing to anyone who isn't already a Python programmer.
-        raise RuntimeError(f'Could not reach {url} ({e.reason}) - check your internet connection and try again.') from e
+        # Reuses net.py's own message for this same case instead of a second,
+        # independently-worded copy - the two used to say the same thing.
+        raise RuntimeError(net._friendly_url_error(e, url)) from e
     if raw:
         return response
     return dict(response.info()), response.read()
@@ -1483,9 +1487,11 @@ def download_recovery(version, outdir):
     whenever nothing's cached, the product id doesn't match, or the cached
     copy fails verification - never trusts a cached file blindly.
     """
-    cnkpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.chunklist')
-    dmgpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.dmg')
-    product_marker = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.product')
+    base_name = f'BaseSystem-{version["darwin"]}'
+    cnk_name, dmg_name = f'{base_name}.chunklist', f'{base_name}.dmg'
+    cnkpath = os.path.join(outdir, cnk_name)
+    dmgpath = os.path.join(outdir, dmg_name)
+    product_marker = os.path.join(outdir, f'{base_name}.product')
 
     print(f'Requesting {version["name"]} Internet Recovery image from Apple (board-id {version["board_id"]})...')
     session = _get_session()
@@ -1511,8 +1517,8 @@ def download_recovery(version, outdir):
         print(f'A cached {version["name"]} image exists but Apple is now offering a different '
               f'build ({cached_product} -> {info[INFO_PRODUCT]}) - downloading the current one.')
 
-    cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], f'BaseSystem-{version["darwin"]}.chunklist', outdir)
-    dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], f'BaseSystem-{version["darwin"]}.dmg', outdir)
+    cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], cnk_name, outdir)
+    dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], dmg_name, outdir)
     _verify_image(dmgpath, cnkpath)
     with open(product_marker, 'w') as f:
         f.write(info[INFO_PRODUCT])
@@ -1608,8 +1614,7 @@ def list_disks():
         import plistlib
         data = plistlib.loads(out.encode())
         for disk_id in data.get('WholeDisks', []):
-            info = _run(['diskutil', 'info', '-plist', disk_id], check=False, quiet=True).stdout
-            info_data = plistlib.loads(info.encode())
+            info_data = _diskutil_info(disk_id)
             size = info_data.get('TotalSize', 0) / (1024 ** 3)
             name = info_data.get('MediaName', disk_id)
             bus = info_data.get('BusProtocol', 'Unknown')
@@ -1725,7 +1730,11 @@ def confirm_and_wipe(disk_id, label, size_gib=None, auto=False):
         raise SystemExit('Confirmation did not match - aborting, nothing was touched.')
 
 
-def _dir_size(path):
+def dir_size(path):
+    """Total bytes of every file under path. Public (no leading underscore)
+    since hackintosh_setup.py's own _workdir_size_gib() needs the exact
+    same walk-and-sum and previously duplicated it instead of importing
+    this."""
     total = 0
     for base, _dirs, files in os.walk(path):
         for name in files:
@@ -1763,7 +1772,7 @@ def _backup_one_volume(mount_point, dest_dir, label, used_hint=None):
               f'volume, {free / 2**30:.1f} GB free at {backup_root}) - skipping this volume\'s backup.')
         return 0
     shutil.copytree(mount_point, dest_dir, symlinks=True, ignore_dangling_symlinks=True)
-    return _dir_size(dest_dir)
+    return dir_size(dest_dir)
 
 
 def backup_existing_data(disk_id, backup_dir):
@@ -1806,7 +1815,14 @@ def backup_existing_data(disk_id, backup_dir):
         return None
 
 
-def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir, used_hint=None):
+def _backup_partition(mount_point, unmount_fn, label, backup_dir, used_hint=None):
+    """unmount_fn: called in the finally block when this function mounted
+    mount_point itself and needs to undo that - None when it was already
+    mounted (or, on Windows, never needs an explicit unmount at all).
+    Was previously two separate parameters (a we_mounted_it bool plus
+    unmount_fn) that had to be kept in sync by every caller for no reason -
+    "we mounted it" and "there's an unmount function to call" are the same
+    fact."""
     dest = os.path.join(backup_dir, label)
     if os.path.exists(dest):
         # Two partitions on the same disk can genuinely share a label - not
@@ -1831,7 +1847,7 @@ def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir,
               f'nothing on the real disk has been touched yet.')
         return 0
     finally:
-        if we_mounted_it:
+        if unmount_fn:
             unmount_fn()
 
 
@@ -1901,14 +1917,14 @@ def _backup_existing_data_macos(disk_id, backup_dir):
         label = part.get('VolumeName') or part_id
         info = _diskutil_info(part_id)
         mount_point = info.get('MountPoint')
-        we_mounted_it = False
+        unmount_fn = None
         if not mount_point:
             result = _run(['diskutil', 'mount', part_id], check=False, quiet=True)
             if result.returncode != 0:
                 print(f'Could not mount {part_id} ("{label}") to check it for existing data - '
                       f'skipping (unsupported filesystem, or nothing there to mount).')
                 continue
-            we_mounted_it = True
+            unmount_fn = lambda pid=part_id: _run(['diskutil', 'unmount', pid], check=False, quiet=True)
             mount_point = _diskutil_info(part_id).get('MountPoint')
             if not mount_point:
                 # diskutil mount reported success but hasn't registered a
@@ -1920,9 +1936,8 @@ def _backup_existing_data_macos(disk_id, backup_dir):
                 _run(['diskutil', 'unmount', part_id], check=False, quiet=True)
                 continue
 
-        copied = _backup_partition(mount_point, we_mounted_it,
-                                    lambda pid=part_id: _run(['diskutil', 'unmount', pid], check=False, quiet=True),
-                                    label, backup_dir, used_hint=part.get('CapacityInUse'))
+        copied = _backup_partition(mount_point, unmount_fn, label, backup_dir,
+                                    used_hint=part.get('CapacityInUse'))
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
@@ -1959,7 +1974,7 @@ def _backup_existing_data_linux(disk_id, backup_dir):
             continue
         part_path = f'/dev/{name}'
         mount_point = part.get('mountpoint')
-        we_mounted_it = False
+        unmount_fn = None
         if not mount_point:
             mount_point = f'/mnt/hackintosh_backup_{name}'
             os.makedirs(mount_point, exist_ok=True)
@@ -1968,11 +1983,9 @@ def _backup_existing_data_linux(disk_id, backup_dir):
                 print(f'Could not mount {part_path} ("{label}") to check it for existing data - '
                       f'skipping (unsupported filesystem, or nothing there to mount).')
                 continue
-            we_mounted_it = True
+            unmount_fn = lambda mp=mount_point: _run(['umount', mp], check=False, quiet=True)
 
-        copied = _backup_partition(mount_point, we_mounted_it,
-                                    lambda mp=mount_point: _run(['umount', mp], check=False, quiet=True),
-                                    label, backup_dir)
+        copied = _backup_partition(mount_point, unmount_fn, label, backup_dir)
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
@@ -2018,7 +2031,7 @@ def _backup_existing_data_windows(disk_id, backup_dir):
         label = f'{letter}_drive'
         mount_point = f'{letter}:\\'
 
-        copied = _backup_partition(mount_point, False, lambda: None, label, backup_dir)
+        copied = _backup_partition(mount_point, None, label, backup_dir)
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
@@ -4096,14 +4109,7 @@ def _format_duration(seconds):
 
 
 def _workdir_size_gib():
-    total = 0
-    for base, _dirs, files in os.walk(WORKDIR):
-        for name in files:
-            try:
-                total += os.path.getsize(os.path.join(base, name))
-            except OSError:
-                pass
-    return total / (1024 ** 3)
+    return partition.dir_size(WORKDIR) / (1024 ** 3)
 
 
 def main():

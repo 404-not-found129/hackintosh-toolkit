@@ -80,8 +80,7 @@ def list_disks():
         import plistlib
         data = plistlib.loads(out.encode())
         for disk_id in data.get('WholeDisks', []):
-            info = _run(['diskutil', 'info', '-plist', disk_id], check=False, quiet=True).stdout
-            info_data = plistlib.loads(info.encode())
+            info_data = _diskutil_info(disk_id)
             size = info_data.get('TotalSize', 0) / (1024 ** 3)
             name = info_data.get('MediaName', disk_id)
             bus = info_data.get('BusProtocol', 'Unknown')
@@ -197,7 +196,11 @@ def confirm_and_wipe(disk_id, label, size_gib=None, auto=False):
         raise SystemExit('Confirmation did not match - aborting, nothing was touched.')
 
 
-def _dir_size(path):
+def dir_size(path):
+    """Total bytes of every file under path. Public (no leading underscore)
+    since hackintosh_setup.py's own _workdir_size_gib() needs the exact
+    same walk-and-sum and previously duplicated it instead of importing
+    this."""
     total = 0
     for base, _dirs, files in os.walk(path):
         for name in files:
@@ -235,7 +238,7 @@ def _backup_one_volume(mount_point, dest_dir, label, used_hint=None):
               f'volume, {free / 2**30:.1f} GB free at {backup_root}) - skipping this volume\'s backup.')
         return 0
     shutil.copytree(mount_point, dest_dir, symlinks=True, ignore_dangling_symlinks=True)
-    return _dir_size(dest_dir)
+    return dir_size(dest_dir)
 
 
 def backup_existing_data(disk_id, backup_dir):
@@ -278,7 +281,14 @@ def backup_existing_data(disk_id, backup_dir):
         return None
 
 
-def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir, used_hint=None):
+def _backup_partition(mount_point, unmount_fn, label, backup_dir, used_hint=None):
+    """unmount_fn: called in the finally block when this function mounted
+    mount_point itself and needs to undo that - None when it was already
+    mounted (or, on Windows, never needs an explicit unmount at all).
+    Was previously two separate parameters (a we_mounted_it bool plus
+    unmount_fn) that had to be kept in sync by every caller for no reason -
+    "we mounted it" and "there's an unmount function to call" are the same
+    fact."""
     dest = os.path.join(backup_dir, label)
     if os.path.exists(dest):
         # Two partitions on the same disk can genuinely share a label - not
@@ -303,7 +313,7 @@ def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir,
               f'nothing on the real disk has been touched yet.')
         return 0
     finally:
-        if we_mounted_it:
+        if unmount_fn:
             unmount_fn()
 
 
@@ -373,14 +383,14 @@ def _backup_existing_data_macos(disk_id, backup_dir):
         label = part.get('VolumeName') or part_id
         info = _diskutil_info(part_id)
         mount_point = info.get('MountPoint')
-        we_mounted_it = False
+        unmount_fn = None
         if not mount_point:
             result = _run(['diskutil', 'mount', part_id], check=False, quiet=True)
             if result.returncode != 0:
                 print(f'Could not mount {part_id} ("{label}") to check it for existing data - '
                       f'skipping (unsupported filesystem, or nothing there to mount).')
                 continue
-            we_mounted_it = True
+            unmount_fn = lambda pid=part_id: _run(['diskutil', 'unmount', pid], check=False, quiet=True)
             mount_point = _diskutil_info(part_id).get('MountPoint')
             if not mount_point:
                 # diskutil mount reported success but hasn't registered a
@@ -392,9 +402,8 @@ def _backup_existing_data_macos(disk_id, backup_dir):
                 _run(['diskutil', 'unmount', part_id], check=False, quiet=True)
                 continue
 
-        copied = _backup_partition(mount_point, we_mounted_it,
-                                    lambda pid=part_id: _run(['diskutil', 'unmount', pid], check=False, quiet=True),
-                                    label, backup_dir, used_hint=part.get('CapacityInUse'))
+        copied = _backup_partition(mount_point, unmount_fn, label, backup_dir,
+                                    used_hint=part.get('CapacityInUse'))
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
@@ -431,7 +440,7 @@ def _backup_existing_data_linux(disk_id, backup_dir):
             continue
         part_path = f'/dev/{name}'
         mount_point = part.get('mountpoint')
-        we_mounted_it = False
+        unmount_fn = None
         if not mount_point:
             mount_point = f'/mnt/hackintosh_backup_{name}'
             os.makedirs(mount_point, exist_ok=True)
@@ -440,11 +449,9 @@ def _backup_existing_data_linux(disk_id, backup_dir):
                 print(f'Could not mount {part_path} ("{label}") to check it for existing data - '
                       f'skipping (unsupported filesystem, or nothing there to mount).')
                 continue
-            we_mounted_it = True
+            unmount_fn = lambda mp=mount_point: _run(['umount', mp], check=False, quiet=True)
 
-        copied = _backup_partition(mount_point, we_mounted_it,
-                                    lambda mp=mount_point: _run(['umount', mp], check=False, quiet=True),
-                                    label, backup_dir)
+        copied = _backup_partition(mount_point, unmount_fn, label, backup_dir)
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
@@ -490,7 +497,7 @@ def _backup_existing_data_windows(disk_id, backup_dir):
         label = f'{letter}_drive'
         mount_point = f'{letter}:\\'
 
-        copied = _backup_partition(mount_point, False, lambda: None, label, backup_dir)
+        copied = _backup_partition(mount_point, None, label, backup_dir)
         backed_up_any = backed_up_any or bool(copied)
 
     return backup_dir if backed_up_any else None
