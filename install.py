@@ -1752,17 +1752,58 @@ def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir)
             unmount_fn()
 
 
+def _resolve_apfs_container_volumes(container_partition_id, all_disks_and_partitions):
+    """A partition with Content "Apple_APFS" isn't a mountable filesystem
+    itself - it's a physical store backing a *separate*, synthesized whole-
+    disk entry (own DeviceIdentifier, Content "Apple_APFS_Container") whose
+    real, mountable volumes live in THAT entry's own "APFSVolumes" list, not
+    the "Partitions" list disk_id's own entry has. install_efi.py's
+    physical_whole_disk_for() resolves this same indirection in the other
+    direction (a volume back to its physical disk); this is volume-
+    resolution the other way, done fresh here since backup_existing_data()
+    starts from the disk about to be wiped, not a specific mounted volume.
+    Verified live against this session's own real APFS boot disk - the
+    plist key names/shapes here (APFSPhysicalStores' entries keyed
+    "DeviceIdentifier" in this global `diskutil list` view, vs. the
+    differently-shaped "APFSPhysicalStore" key `diskutil info` on a single
+    disk returns) were confirmed exactly, not assumed to match.
+    Returns [(volume_id, volume_label)], or [] if nothing resolved (a
+    container disk-utility itself failed to report, e.g.)."""
+    for d in all_disks_and_partitions:
+        stores = d.get('APFSPhysicalStores') or []
+        if any(s.get('DeviceIdentifier') == container_partition_id for s in stores):
+            return [(v['DeviceIdentifier'], v.get('VolumeName')) for v in d.get('APFSVolumes', [])]
+    return []
+
+
 def _backup_existing_data_macos(disk_id, backup_dir):
-    out = _run(['diskutil', 'list', '-plist', disk_id], check=False, quiet=True).stdout
+    out = _run(['diskutil', 'list', '-plist'], check=False, quiet=True).stdout
     import plistlib
-    data = plistlib.loads(out.encode())
+    all_data = plistlib.loads(out.encode())
+    all_disks_and_partitions = all_data.get('AllDisksAndPartitions', [])
     partitions = [
-        p for d in data.get('AllDisksAndPartitions', [])
+        p for d in all_disks_and_partitions
         if d.get('DeviceIdentifier') == disk_id
         for p in d.get('Partitions', [])
     ]
     if not partitions:
         return None
+
+    # A partition that's really an APFS container isn't mountable itself -
+    # see _resolve_apfs_container_volumes() - so expand it into its real
+    # volumes here rather than trying (and failing) to mount the container
+    # partition directly, which would silently skip everything inside it.
+    expanded = []
+    for p in partitions:
+        if p.get('Content') == 'Apple_APFS':
+            volumes = _resolve_apfs_container_volumes(p['DeviceIdentifier'], all_disks_and_partitions)
+            expanded.extend({'DeviceIdentifier': vid, 'VolumeName': vname} for vid, vname in volumes)
+            if not volumes:
+                print(f'{p["DeviceIdentifier"]} is an APFS container but its volumes could not be '
+                      f'resolved - skipping (unsupported/corrupt container, or nothing in it).')
+        else:
+            expanded.append(p)
+    partitions = expanded
 
     backed_up_any = False
     for part in partitions:
