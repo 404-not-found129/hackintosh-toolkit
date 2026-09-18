@@ -6,9 +6,27 @@ import os
 import shutil
 import sys
 import zipfile
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 GITHUB_API_LATEST_RELEASE = 'https://api.github.com/repos/{repo}/releases/latest'
+
+
+def _friendly_url_error(e, url):
+    """A raw urllib.error.HTTPError/URLError left uncaught surfaces as a
+    Python traceback with text like "[Errno 8] nodename nor servname
+    provided" - confirmed live, not obviously "no internet" to anyone who
+    isn't already a Python programmer. Turns the common, actionable cases
+    (GitHub's low anonymous rate limit, no internet/DNS failure) into a
+    message that says what's actually wrong and what to do about it."""
+    if isinstance(e, HTTPError):
+        if e.code == 403:
+            return (f'GitHub returned 403 (rate limited) fetching {url} - unauthenticated GitHub '
+                     f'requests are capped at a low hourly limit. Wait a while and try again.')
+        if e.code == 404:
+            return f'{url} returned 404 (not found) - it may have moved or been renamed upstream.'
+        return f'{url} returned HTTP {e.code}.'
+    return f'Could not reach {url} ({e.reason}) - check your internet connection and try again.'
 
 
 def isolate_module_cache(*names):
@@ -32,8 +50,11 @@ def isolate_module_cache(*names):
 
 def api_get(url):
     req = Request(url, headers={'User-Agent': 'hackintosh-toolkit', 'Accept': 'application/vnd.github+json'})
-    with urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except URLError as e:
+        raise RuntimeError(_friendly_url_error(e, url)) from e
 
 
 def download(url, dest):
@@ -43,8 +64,11 @@ def download(url, dest):
     if parent:
         os.makedirs(parent, exist_ok=True)
     req = Request(url, headers={'User-Agent': 'hackintosh-toolkit'})
-    with urlopen(req, timeout=60) as resp, open(dest, 'wb') as f:
-        shutil.copyfileobj(resp, f)
+    try:
+        with urlopen(req, timeout=60) as resp, open(dest, 'wb') as f:
+            shutil.copyfileobj(resp, f)
+    except URLError as e:
+        raise RuntimeError(_friendly_url_error(e, url)) from e
     return dest
 
 

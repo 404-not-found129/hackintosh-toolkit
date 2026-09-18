@@ -24,7 +24,7 @@ import string
 import struct
 import sys
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 
 MLB_ZERO = '00000000000000000'
@@ -78,7 +78,17 @@ def _run_query(url, headers, post=None, raw=False):
     try:
         response = urlopen(req, timeout=30)
     except HTTPError as e:
-        raise RuntimeError(f'HTTP error {e.code} contacting {url}') from e
+        raise RuntimeError(
+            f'Apple\'s server returned HTTP {e.code} for {url} - it may be temporarily down, or '
+            f'this board-id may no longer be recognized. Try again, or pick a different macOS version.'
+        ) from e
+    except URLError as e:
+        # HTTPError (above) is itself a URLError subclass, so this only ever
+        # catches the no-connection case (DNS failure, no route, timeout) -
+        # confirmed live, this used to surface as a raw traceback reading
+        # "[Errno 8] nodename nor servname provided, or not known", which
+        # means nothing to anyone who isn't already a Python programmer.
+        raise RuntimeError(f'Could not reach {url} ({e.reason}) - check your internet connection and try again.') from e
     if raw:
         return response
     return dict(response.info()), response.read()
