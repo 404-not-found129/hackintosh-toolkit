@@ -152,10 +152,14 @@ get committed - but avoiding it in the first place is simpler.)
    confirmed, every existing partition on that disk is backed up to
    `hackintosh_build/usb_backup_<timestamp>/` before anything is erased -
    verified live (byte-for-byte) against a real mounted volume, an
-   unmounted one this step had to mount itself first, and a blank disk with
-   nothing to back up. A partition with a filesystem this host genuinely
-   can't read is skipped with a clear warning rather than silently treated
-   as empty (`partition.py`, `write_basesystem.py`).
+   unmounted one this step had to mount itself first, a blank disk with
+   nothing to back up, and a real APFS-formatted disk (resolved down to its
+   actual volumes, not the unmountable container partition). A partition
+   with a filesystem this host genuinely can't read is skipped with a clear
+   warning rather than silently treated as empty. A `MANIFEST.txt` in the
+   backup folder lists which partition each subfolder came from and how
+   much was backed up, so you can see what's there without exploring the
+   whole tree (`partition.py`, `write_basesystem.py`).
 7. **Copies OpCore-Simplify's EFI onto the EFI partition**, then patches it
    for iMessage: ROM becomes a real detected network adapter's MAC address
    (OpCore-Simplify's own SMBIOS generator uses a random one by default -

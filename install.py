@@ -1745,6 +1745,27 @@ def dir_size(path):
     return total
 
 
+def _write_backup_manifest(backup_dir, disk_id, entries):
+    """entries: [(part_id, label, dest, copied_bytes)] for every partition
+    that actually got backed up. Writes backup_dir/MANIFEST.txt so the
+    contents of a usb_backup_<timestamp>/ folder are readable at a glance -
+    which partition each subfolder came from and how much was in it -
+    instead of having to explore the tree to find out."""
+    import datetime
+    total = sum(copied for _, _, _, copied in entries)
+    lines = [
+        f'Backup of {disk_id}, made {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        '=' * 70,
+    ]
+    for part_id, label, dest, copied in entries:
+        lines.append(f'{os.path.relpath(dest, backup_dir)}/  <-  {part_id} ("{label}"), '
+                      f'{copied / 2**20:.1f} MB')
+    lines.append('=' * 70)
+    lines.append(f'Total: {total / 2**20:.1f} MB across {len(entries)} partition(s)')
+    with open(os.path.join(backup_dir, 'MANIFEST.txt'), 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
 def _backup_one_volume(mount_point, dest_dir, label, used_hint=None):
     """Copies mount_point's contents into dest_dir. Returns bytes actually
     copied (0 if the volume was empty or the backup was skipped). Checks
@@ -1822,7 +1843,11 @@ def _backup_partition(mount_point, unmount_fn, label, backup_dir, used_hint=None
     Was previously two separate parameters (a we_mounted_it bool plus
     unmount_fn) that had to be kept in sync by every caller for no reason -
     "we mounted it" and "there's an unmount function to call" are the same
-    fact."""
+    fact.
+
+    Returns (copied_bytes, dest) - dest is the real destination used (may
+    have a disambiguating suffix, see below), needed by callers that write
+    backup_existing_data()'s MANIFEST.txt."""
     dest = os.path.join(backup_dir, label)
     if os.path.exists(dest):
         # Two partitions on the same disk can genuinely share a label - not
@@ -1841,11 +1866,11 @@ def _backup_partition(mount_point, unmount_fn, label, backup_dir, used_hint=None
             print(f'  Backed up {copied / 2**20:.1f} MB to {dest}')
         else:
             print('  Nothing to back up (empty, or skipped - see above).')
-        return copied
+        return copied, dest
     except Exception as e:
         print(f'  Backup of "{label}" failed ({e}) - continuing with the other partitions, if any; '
               f'nothing on the real disk has been touched yet.')
-        return 0
+        return 0, dest
     finally:
         if unmount_fn:
             unmount_fn()
@@ -1911,7 +1936,7 @@ def _backup_existing_data_macos(disk_id, backup_dir):
             expanded.append(p)
     partitions = expanded
 
-    backed_up_any = False
+    entries = []
     for part in partitions:
         part_id = part['DeviceIdentifier']
         label = part.get('VolumeName') or part_id
@@ -1936,11 +1961,15 @@ def _backup_existing_data_macos(disk_id, backup_dir):
                 _run(['diskutil', 'unmount', part_id], check=False, quiet=True)
                 continue
 
-        copied = _backup_partition(mount_point, unmount_fn, label, backup_dir,
-                                    used_hint=part.get('CapacityInUse'))
-        backed_up_any = backed_up_any or bool(copied)
+        copied, dest = _backup_partition(mount_point, unmount_fn, label, backup_dir,
+                                          used_hint=part.get('CapacityInUse'))
+        if copied:
+            entries.append((part_id, label, dest, copied))
 
-    return backup_dir if backed_up_any else None
+    if not entries:
+        return None
+    _write_backup_manifest(backup_dir, disk_id, entries)
+    return backup_dir
 
 
 def _backup_existing_data_linux(disk_id, backup_dir):
@@ -1961,7 +1990,7 @@ def _backup_existing_data_linux(disk_id, backup_dir):
     if not partitions:
         return None
 
-    backed_up_any = False
+    entries = []
     for part in partitions:
         name = part.get('name')
         if not name:
@@ -1985,10 +2014,14 @@ def _backup_existing_data_linux(disk_id, backup_dir):
                 continue
             unmount_fn = lambda mp=mount_point: _run(['umount', mp], check=False, quiet=True)
 
-        copied = _backup_partition(mount_point, unmount_fn, label, backup_dir)
-        backed_up_any = backed_up_any or bool(copied)
+        copied, dest = _backup_partition(mount_point, unmount_fn, label, backup_dir)
+        if copied:
+            entries.append((part_path, label, dest, copied))
 
-    return backup_dir if backed_up_any else None
+    if not entries:
+        return None
+    _write_backup_manifest(backup_dir, disk_id, entries)
+    return backup_dir
 
 
 def _backup_existing_data_windows(disk_id, backup_dir):
@@ -2008,7 +2041,7 @@ def _backup_existing_data_windows(disk_id, backup_dir):
     if not data:
         return None
 
-    backed_up_any = False
+    entries = []
     for part in data:
         letter = part.get('DriveLetter')
         part_number = part.get('PartitionNumber')
@@ -2031,10 +2064,14 @@ def _backup_existing_data_windows(disk_id, backup_dir):
         label = f'{letter}_drive'
         mount_point = f'{letter}:\\'
 
-        copied = _backup_partition(mount_point, None, label, backup_dir)
-        backed_up_any = backed_up_any or bool(copied)
+        copied, dest = _backup_partition(mount_point, None, label, backup_dir)
+        if copied:
+            entries.append((f'Partition {part_number}', label, dest, copied))
 
-    return backup_dir if backed_up_any else None
+    if not entries:
+        return None
+    _write_backup_manifest(backup_dir, disk_id, entries)
+    return backup_dir
 
 
 def _find_macos_partitions(disk_id):
