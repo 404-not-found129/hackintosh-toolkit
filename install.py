@@ -4081,6 +4081,17 @@ class _Tee:
     def write(self, data):
         self._stream.write(data)
         self._log_file.write(data)
+        # Confirmed live from a real crashed run: without this, the log
+        # file only gets Python's normal block-buffered writes, which sit
+        # in memory until the buffer fills or the process exits cleanly -
+        # so a run that crashes or gets killed loses everything printed
+        # since the last flush from the log file on disk, even though it
+        # was already visible on the real terminal. That's exactly the
+        # part of the log most worth having (whatever was happening right
+        # before the crash) - flushing after every write costs a cheap
+        # in-memory-to-kernel-buffer sync, not a disk fsync, so doing it
+        # on every line is not a meaningful perf cost for a CLI tool.
+        self._log_file.flush()
 
     def flush(self):
         self._stream.flush()
