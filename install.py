@@ -855,7 +855,15 @@ def _amd_codename(brand):
     """
     if 'THREADRIPPER' in brand.upper() or 'EPYC' in brand.upper():
         return None
-    match = re.search(r'\bRyzen\s+\d\s+(\d)(\d{3})([A-Z]*)\b', brand, re.IGNORECASE)
+    # [A-Z0-9]*, not [A-Z]* - a plain [A-Z]* can never match a "X3D" suffix
+    # (7950X3D, 7800X3D, 9950X3D, ...): [A-Z] can't consume the digit in
+    # "3D", and \b can't then close the match either, since a letter run
+    # ending in "X" is immediately followed by "3" - both \w, so there's no
+    # boundary there for \b to match. Confirmed live: the old pattern
+    # returned no match at all (not just a wrong codename) for every X3D
+    # model, silently falling back to 'Unknown' for some of AMD's most
+    # popular current desktop CPUs.
+    match = re.search(r'\bRyzen\s+\d\s+(\d)(\d{3})([A-Z0-9]*)\b', brand, re.IGNORECASE)
     if not match:
         return None
     generation_digit, _model_rest, suffix = match.groups()
