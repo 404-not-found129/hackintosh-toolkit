@@ -14,12 +14,15 @@ ordinary case:
      with its own recommended defaults - compatibility checking, ACPI
      patches, kext selection, and SMBIOS are all OpCore-Simplify's own
      tested logic, just no longer typed in by hand (opcore_simplify.py).
-     Three kinds of question still stop for a real answer: which macOS
+     Four kinds of question still stop for a real answer: which macOS
      version to install (OpenCore-Simplify's own menu, defaulting to its
      suggested version on a bare Enter), which GPU/WiFi/Bluetooth device to
-     use on hardware with more than one, and whether to accept OpenCore
-     Legacy Patcher's SIP/AMFI tradeoff - see opcore_simplify.py's module
-     docstring for why those aren't silently defaulted.
+     use on hardware with more than one, whether to accept OpenCore Legacy
+     Patcher's SIP/AMFI tradeoff - see opcore_simplify.py's module
+     docstring for why those aren't silently defaulted - and whether to
+     back up the target disk before wiping it (defaults to yes on a bare
+     Enter, since it's a safety net, not a tradeoff with two reasonable
+     answers; type "n" to skip it).
   2. Fetch the Recovery/BaseSystem image for whichever macOS version you
      picked, straight from Apple (macrecovery.py) - no need to say which
      one again, it's captured directly from what you answered above.
@@ -28,13 +31,14 @@ ordinary case:
      auto-confirmed after a 5-second countdown (Ctrl+C to abort) instead of
      typing a confirmation phrase; with zero or multiple candidates it
      still asks, since there's no safe default for "which disk". Once
-     confirmed, whatever's already on that disk is backed up to
+     confirmed, and unless you said no to the backup question above,
+     whatever's already on that disk is backed up to
      hackintosh_build/usb_backup_<timestamp>/ before anything is touched -
      this is the one destructive step in the whole toolkit, so picking the
      wrong disk (or just wanting the old contents back later) doesn't mean
-     losing them. Then it's partitioned (EFI System Partition + a partition
-     for the BaseSystem image) and the image is written on
-     (partition.py, write_basesystem.py).
+     losing them - see restore_backup.py. Then it's partitioned (EFI System
+     Partition + a partition for the BaseSystem image) and the image is
+     written on (partition.py, write_basesystem.py).
   4. Copy OpCore-Simplify's EFI onto the EFI partition, patch it for
      iMessage (real ROM MAC + built-in DeviceProperty), and run USB port
      mapping (immediate on Linux; hands off to USBToolBox on Windows/macOS).
@@ -276,12 +280,21 @@ def main():
 
     print()
     print('== Backing up anything already on the disk, before it gets wiped ==')
-    backup_dir = os.path.join(WORKDIR, 'usb_backup_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
-    backed_up_to = partition.backup_existing_data(disk_id, backup_dir)
-    if backed_up_to:
-        print(f'Backed up existing data from {disk_id} to {backed_up_to}')
+    want_backup = input(f'Back up whatever\'s currently on {disk_id} before wiping it? [Y/n]: ').strip().lower()
+    backed_up_to = None
+    # Checked against both "n" and "no" rather than just != "n" - this is a
+    # data-safety decision, so a typed "no" being silently swallowed into
+    # the (correct-for-blank-input) "yes" branch would be exactly the wrong
+    # kind of forgiving. Anything else (blank, "y", "yes", ...) backs up.
+    if want_backup not in ('n', 'no'):
+        backup_dir = os.path.join(WORKDIR, 'usb_backup_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        backed_up_to = partition.backup_existing_data(disk_id, backup_dir)
+        if backed_up_to:
+            print(f'Backed up existing data from {disk_id} to {backed_up_to}')
+        else:
+            print('Nothing worth backing up was found on this disk (blank, or nothing readable).')
     else:
-        print('Nothing worth backing up was found on this disk (blank, or nothing readable).')
+        print('Skipping the backup, as requested - nothing currently on this disk will be preserved.')
 
     # A large backup can eat most of the free space at WORKDIR's own
     # filesystem, which the upcoming macOS Recovery download also needs -
@@ -294,9 +307,10 @@ def main():
               f'needs 0.5-2GB+ and may not fit. Free up space now if you want to avoid that failing '
               f'partway through the rest of this run.')
 
-    # backup_existing_data() can take real time on a disk with a lot of
-    # existing data - confirm the disk this operator approved earlier is
-    # still the same physical device before actually wiping it.
+    # A real backup can take a while on a disk with a lot of existing data,
+    # widening the gap since disk_id was confirmed - cheap enough to check
+    # unconditionally either way, so it's not skipped just because this
+    # particular run skipped the backup itself.
     partition.verify_disk_still_matches(disk_id, label, size_gib)
 
     print()

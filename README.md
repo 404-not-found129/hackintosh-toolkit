@@ -144,13 +144,15 @@ get committed - but avoiding it in the first place is simpler.)
    report as "external" (a genuine quirk, no real ACPI/PCI "internal"
    marker exists on non-Mac boards) - detection is bus/transport-based,
    not the OS's own internal/external flag (`partition.py`).
-6. **Backs up whatever's already on the disk, then partitions it and writes
-   the BaseSystem image on** - EFI System Partition + a partition for the
-   image. If exactly one USB/SD device is connected, wiping it is
-   auto-confirmed after a 5-second countdown (Ctrl+C to abort) instead of
-   typing a confirmation phrase back; with zero or multiple candidates it
-   still asks, since there's no safe default for "which disk". Once
-   confirmed, every existing partition on that disk is backed up to
+6. **Asks whether to back up whatever's already on the disk, then
+   partitions it and writes the BaseSystem image on** - EFI System
+   Partition + a partition for the image. If exactly one USB/SD device is
+   connected, wiping it is auto-confirmed after a 5-second countdown
+   (Ctrl+C to abort) instead of typing a confirmation phrase back; with
+   zero or multiple candidates it still asks, since there's no safe
+   default for "which disk". Once confirmed, you're asked whether to back
+   it up first (defaults to yes on a bare Enter - type "n" to skip); if
+   so, every existing partition on that disk is backed up to
    `hackintosh_build/usb_backup_<timestamp>/` before anything is erased -
    verified live (byte-for-byte) against a real mounted volume, an
    unmounted one this step had to mount itself first, a blank disk with
@@ -303,7 +305,7 @@ for exactly which situations still stop and ask you something, and why.
 
 This toolkit answers OpCore-Simplify's own menu prompts itself (see
 `opcore_simplify.py`'s module docstring for the full list, each verified
-against its actual source) rather than asking you to type them in. Two
+against its actual source) rather than asking you to type them in. Three
 questions still show a default you can accept with a single Enter, and two
 more have no default at all - genuinely nothing is ever picked for you
 silently, without you seeing and confirming it:
@@ -316,6 +318,10 @@ silently, without you seeing and confirming it:
   as the default - press Enter to use it. With several connected (or none
   yet - it waits for you to plug one in), you get a list and pick
   explicitly; see `hackintosh_setup.py`'s `choose_disk()`.
+- **Whether to back up the disk before wiping it.** Defaults to yes on a
+  bare Enter - this is a safety net, not a real tradeoff, so the default
+  is always the safer answer. Type "n" to skip it (e.g. you already know
+  the disk is blank, or don't want to wait for a large backup to copy).
 - **Multiple GPU/WiFi/Bluetooth devices detected.** OpCore-Simplify's own
   menu has no "recommended" choice here - picking the wrong one can mean no
   video output or no WiFi/Bluetooth. Only comes up on hardware with more
