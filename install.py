@@ -1706,21 +1706,32 @@ def backup_existing_data(disk_id, backup_dir):
 
     Returns backup_dir if anything was actually copied, None if there was
     nothing worth backing up (a blank/unpartitioned disk, or every
-    partition on it was empty). Never raises for a partition it can't read
-    (an unmountable/unsupported filesystem, a permissions error partway
-    through a copy) - that partition's backup is skipped with a clear
-    warning printed instead, and the other partitions (and the eventual
-    wipe) still proceed, since a filesystem gap like that isn't something
-    this toolkit can work around, only report honestly.
+    partition on it was empty). Never raises - not for a partition it can't
+    read (an unmountable/unsupported filesystem, a permissions error
+    partway through a copy - handled per-partition, see _backup_partition())
+    and not for a genuinely unexpected failure discovering the disk's
+    partitions at all (e.g. diskutil/lsblk/Get-Partition itself failing or
+    returning something unparseable - confirmed live that an empty/invalid
+    diskutil response makes plistlib itself raise, which would otherwise
+    propagate straight out of this function and crash the whole install
+    over a failed *backup*, exactly the outcome this function's whole
+    purpose is to avoid). Either way, the eventual wipe still proceeds -
+    a missed backup isn't something this toolkit can work around, only
+    report honestly, and it was never a hard requirement to begin with.
     """
     osname = hw_detect.host_os()
-    if osname == 'macos':
-        return _backup_existing_data_macos(disk_id, backup_dir)
-    if osname == 'linux':
-        return _backup_existing_data_linux(disk_id, backup_dir)
-    if osname == 'windows':
-        return _backup_existing_data_windows(disk_id, backup_dir)
-    return None
+    try:
+        if osname == 'macos':
+            return _backup_existing_data_macos(disk_id, backup_dir)
+        if osname == 'linux':
+            return _backup_existing_data_linux(disk_id, backup_dir)
+        if osname == 'windows':
+            return _backup_existing_data_windows(disk_id, backup_dir)
+        return None
+    except Exception as e:
+        print(f'Could not check {disk_id} for existing data to back up ({e}) - proceeding without '
+              f'one. Nothing on the real disk has been touched yet.')
+        return None
 
 
 def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir):
