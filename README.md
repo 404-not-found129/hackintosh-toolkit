@@ -143,12 +143,19 @@ get committed - but avoiding it in the first place is simpler.)
    report as "external" (a genuine quirk, no real ACPI/PCI "internal"
    marker exists on non-Mac boards) - detection is bus/transport-based,
    not the OS's own internal/external flag (`partition.py`).
-6. **Partitions it and writes the BaseSystem image on** - EFI System
-   Partition + a partition for the image. If exactly one USB/SD device is
-   connected, wiping it is auto-confirmed after a 5-second countdown
-   (Ctrl+C to abort) instead of typing a confirmation phrase back; with
-   zero or multiple candidates it still asks, since there's no safe
-   default for "which disk" (`partition.py`, `write_basesystem.py`).
+6. **Backs up whatever's already on the disk, then partitions it and writes
+   the BaseSystem image on** - EFI System Partition + a partition for the
+   image. If exactly one USB/SD device is connected, wiping it is
+   auto-confirmed after a 5-second countdown (Ctrl+C to abort) instead of
+   typing a confirmation phrase back; with zero or multiple candidates it
+   still asks, since there's no safe default for "which disk". Once
+   confirmed, every existing partition on that disk is backed up to
+   `hackintosh_build/usb_backup_<timestamp>/` before anything is erased -
+   verified live (byte-for-byte) against a real mounted volume, an
+   unmounted one this step had to mount itself first, and a blank disk with
+   nothing to back up. A partition with a filesystem this host genuinely
+   can't read is skipped with a clear warning rather than silently treated
+   as empty (`partition.py`, `write_basesystem.py`).
 7. **Copies OpCore-Simplify's EFI onto the EFI partition**, then patches it
    for iMessage: ROM becomes a real detected network adapter's MAC address
    (OpCore-Simplify's own SMBIOS generator uses a random one by default -
@@ -405,4 +412,10 @@ python3 imessage.py --apply    # actually clean up
   back - read the disk identifier and size carefully before doing so. With
   only one connected, that step is auto-confirmed after a 5-second
   countdown (see "Automation and safety" above) - make sure the only
-  removable drive plugged in is actually the one you want erased.
+  removable drive plugged in is actually the one you want erased. Once
+  confirmed, whatever was already on the disk is backed up to
+  `hackintosh_build/usb_backup_<timestamp>/` before it's erased - a safety
+  net for picking the wrong disk, not a reason to skip reading the prompt
+  carefully (a filesystem this host can't read at all can't be backed up
+  either, and a very large existing drive may not fit in the free space
+  available for the backup).

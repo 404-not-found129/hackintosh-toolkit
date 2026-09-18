@@ -19,6 +19,7 @@ device, never a disk picked out of a list of several or an internal drive.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -169,6 +170,202 @@ def confirm_and_wipe(disk_id, label, size_gib=None, auto=False):
         raise SystemExit('Confirmation did not match - aborting, nothing was touched.')
 
 
+def _dir_size(path):
+    total = 0
+    for base, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(base, name))
+            except OSError:
+                pass
+    return total
+
+
+def _backup_one_volume(mount_point, dest_dir, label):
+    """Copies mount_point's contents into dest_dir. Returns bytes actually
+    copied (0 if the volume was empty or the backup was skipped). Checks
+    free space at the backup destination against what's used on the source
+    volume first - same reasoning as macrecovery.py's disk-space guard on
+    the Recovery download: fail before writing anything instead of partway
+    through a large copy."""
+    used = shutil.disk_usage(mount_point).used
+    backup_root = os.path.dirname(os.path.abspath(dest_dir))
+    os.makedirs(backup_root, exist_ok=True)
+    free = shutil.disk_usage(backup_root).free
+    if free < used * 1.05:
+        print(f'  Not enough free space to back up "{label}" (~{used / 2**30:.1f} GB used on that '
+              f'volume, {free / 2**30:.1f} GB free at {backup_root}) - skipping this volume\'s backup.')
+        return 0
+    shutil.copytree(mount_point, dest_dir, symlinks=True, ignore_dangling_symlinks=True)
+    return _dir_size(dest_dir)
+
+
+def backup_existing_data(disk_id, backup_dir):
+    """
+    Best-effort backup of every file already on disk_id's existing
+    partitions into backup_dir - call this after confirm_and_wipe() but
+    before create_partitions() actually erases the disk for good. Until
+    now nothing preserved what was already there if the wrong disk got
+    picked, or you just wanted the old contents back afterward - this is
+    THE ONE DESTRUCTIVE STEP IN THE WHOLE TOOLKIT (see module docstring),
+    so it's worth a real safety net, not just a confirmation prompt.
+
+    Returns backup_dir if anything was actually copied, None if there was
+    nothing worth backing up (a blank/unpartitioned disk, or every
+    partition on it was empty). Never raises for a partition it can't read
+    (an unmountable/unsupported filesystem, a permissions error partway
+    through a copy) - that partition's backup is skipped with a clear
+    warning printed instead, and the other partitions (and the eventual
+    wipe) still proceed, since a filesystem gap like that isn't something
+    this toolkit can work around, only report honestly.
+    """
+    osname = hw_detect.host_os()
+    if osname == 'macos':
+        return _backup_existing_data_macos(disk_id, backup_dir)
+    if osname == 'linux':
+        return _backup_existing_data_linux(disk_id, backup_dir)
+    if osname == 'windows':
+        return _backup_existing_data_windows(disk_id, backup_dir)
+    return None
+
+
+def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir):
+    dest = os.path.join(backup_dir, label)
+    print(f'Checking {mount_point} ("{label}") for existing data to back up...')
+    try:
+        copied = _backup_one_volume(mount_point, dest, label)
+        if copied:
+            print(f'  Backed up {copied / 2**20:.1f} MB to {dest}')
+        else:
+            print('  Nothing to back up (empty, or skipped - see above).')
+        return copied
+    except Exception as e:
+        print(f'  Backup of "{label}" failed ({e}) - continuing with the other partitions, if any; '
+              f'nothing on the real disk has been touched yet.')
+        return 0
+    finally:
+        if we_mounted_it:
+            unmount_fn()
+
+
+def _backup_existing_data_macos(disk_id, backup_dir):
+    out = _run(['diskutil', 'list', '-plist', disk_id], check=False, quiet=True).stdout
+    import plistlib
+    data = plistlib.loads(out.encode())
+    partitions = [
+        p for d in data.get('AllDisksAndPartitions', [])
+        if d.get('DeviceIdentifier') == disk_id
+        for p in d.get('Partitions', [])
+    ]
+    if not partitions:
+        return None
+
+    backed_up_any = False
+    for part in partitions:
+        part_id = part['DeviceIdentifier']
+        label = part.get('VolumeName') or part_id
+        info = _diskutil_info(part_id)
+        mount_point = info.get('MountPoint')
+        we_mounted_it = False
+        if not mount_point:
+            result = _run(['diskutil', 'mount', part_id], check=False, quiet=True)
+            if result.returncode != 0:
+                print(f'Could not mount {part_id} ("{label}") to check it for existing data - '
+                      f'skipping (unsupported filesystem, or nothing there to mount).')
+                continue
+            we_mounted_it = True
+            mount_point = _diskutil_info(part_id).get('MountPoint')
+            if not mount_point:
+                continue
+
+        copied = _backup_partition(mount_point, we_mounted_it,
+                                    lambda pid=part_id: _run(['diskutil', 'unmount', pid], check=False, quiet=True),
+                                    label, backup_dir)
+        backed_up_any = backed_up_any or bool(copied)
+
+    return backup_dir if backed_up_any else None
+
+
+def _backup_existing_data_linux(disk_id, backup_dir):
+    """disk_id is a whole-disk path like /dev/sdb. Finds its existing
+    partitions via lsblk, mounts (read-only) any that aren't already
+    mounted - best effort, since a filesystem this host has no kernel
+    driver for simply can't be mounted, and is skipped with a warning
+    rather than treated as empty."""
+    out = _run(['lsblk', '-J', '-o', 'NAME,MOUNTPOINT,FSTYPE,LABEL', disk_id], check=False, quiet=True).stdout
+    try:
+        data = json.loads(out) if out.strip() else {'blockdevices': []}
+    except ValueError:
+        return None
+    devices = data.get('blockdevices', [])
+    if not devices:
+        return None
+    partitions = devices[0].get('children') or []
+    if not partitions:
+        return None
+
+    backed_up_any = False
+    for part in partitions:
+        name = part.get('name')
+        fstype = part.get('fstype')
+        if not name or not fstype:
+            continue  # no filesystem on this entry - nothing to read
+        part_path = f'/dev/{name}'
+        label = part.get('label') or name
+        mount_point = part.get('mountpoint')
+        we_mounted_it = False
+        if not mount_point:
+            mount_point = f'/mnt/hackintosh_backup_{name}'
+            os.makedirs(mount_point, exist_ok=True)
+            result = _run(['mount', '-o', 'ro', part_path, mount_point], check=False, quiet=True)
+            if result.returncode != 0:
+                print(f'Could not mount {part_path} ("{label}") to check it for existing data - '
+                      f'skipping (unsupported filesystem, or nothing there to mount).')
+                continue
+            we_mounted_it = True
+
+        copied = _backup_partition(mount_point, we_mounted_it,
+                                    lambda mp=mount_point: _run(['umount', mp], check=False, quiet=True),
+                                    label, backup_dir)
+        backed_up_any = backed_up_any or bool(copied)
+
+    return backup_dir if backed_up_any else None
+
+
+def _backup_existing_data_windows(disk_id, backup_dir):
+    """disk_id is the disk Number Get-Disk reports (see list_disks()).
+    Finds its existing partitions via Get-Partition and backs up whatever
+    already has a drive letter - one Windows hasn't assigned a letter to
+    (or whose filesystem it can't read at all, e.g. a Linux-only one) is
+    skipped with a warning, not silently treated as empty."""
+    out = _run(['powershell', '-NoProfile', '-Command',
+                f'Get-Partition -DiskNumber {disk_id} | ConvertTo-Json'], check=False, quiet=True).stdout
+    try:
+        data = json.loads(out) if out.strip() else []
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        data = [data]
+    if not data:
+        return None
+
+    backed_up_any = False
+    for part in data:
+        letter = part.get('DriveLetter')
+        part_number = part.get('PartitionNumber')
+        if not letter or letter in ('\x00',):
+            print(f'Partition {part_number} on disk {disk_id} has no drive letter assigned - '
+                  f'skipping (can\'t read it without one).')
+            continue
+        label = f'{letter}_drive'
+        mount_point = f'{letter}:\\'
+
+        copied = _backup_partition(mount_point, False, lambda: None, label, backup_dir)
+        backed_up_any = backed_up_any or bool(copied)
+
+    return backup_dir if backed_up_any else None
+
+
 def _find_macos_partitions(disk_id):
     """
     Finds the real EFI and TARGET partition identifiers on disk_id after
@@ -270,6 +467,11 @@ def create_partitions(disk_id):
     raise RuntimeError(f'Unsupported OS: {osname}')
 
 
+def _diskutil_info(device_id):
+    import plistlib
+    return plistlib.loads(_run(['diskutil', 'info', '-plist', device_id], check=False, quiet=True).stdout.encode())
+
+
 def mount_efi(efi_partition):
     """Returns a filesystem path the EFI partition is mounted at."""
     osname = hw_detect.host_os()
@@ -285,9 +487,7 @@ def mount_efi(efi_partition):
         # a second EFI-named volume mounts as "/Volumes/EFI 1", and the old
         # code would have silently returned the *first* one's path instead -
         # copying/reading the wrong disk entirely with no error at all.
-        import plistlib
-        info = plistlib.loads(_run(['diskutil', 'info', '-plist', efi_partition],
-                                    check=False, quiet=True).stdout.encode())
+        info = _diskutil_info(efi_partition)
         mount_point = info.get('MountPoint')
         if not mount_point:
             raise RuntimeError(f'{efi_partition} does not appear to be mounted after `diskutil mount` - '

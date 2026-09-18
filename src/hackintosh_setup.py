@@ -24,12 +24,17 @@ ordinary case:
      picked, straight from Apple (macrecovery.py) - no need to say which
      one again, it's captured directly from what you answered above.
   3. Auto-detect a USB/SD card already plugged in (or wait for one if none
-     is), partition it (EFI System Partition + a partition for the
-     BaseSystem image), and write the image on. If exactly one USB/SD
-     device is present, wiping it is auto-confirmed after a 5-second
-     countdown (Ctrl+C to abort) instead of typing a confirmation phrase;
-     with zero or multiple candidates it still asks, since there's no safe
-     default for "which disk" (partition.py, write_basesystem.py).
+     is). If exactly one USB/SD device is present, wiping it is
+     auto-confirmed after a 5-second countdown (Ctrl+C to abort) instead of
+     typing a confirmation phrase; with zero or multiple candidates it
+     still asks, since there's no safe default for "which disk". Once
+     confirmed, whatever's already on that disk is backed up to
+     hackintosh_build/usb_backup_<timestamp>/ before anything is touched -
+     this is the one destructive step in the whole toolkit, so picking the
+     wrong disk (or just wanting the old contents back later) doesn't mean
+     losing them. Then it's partitioned (EFI System Partition + a partition
+     for the BaseSystem image) and the image is written on
+     (partition.py, write_basesystem.py).
   4. Copy OpCore-Simplify's EFI onto the EFI partition, patch it for
      iMessage (real ROM MAC + built-in DeviceProperty), and run USB port
      mapping (immediate on Linux; hands off to USBToolBox on Windows/macOS).
@@ -276,6 +281,15 @@ def main():
     partition.confirm_and_wipe(disk_id, label, size_gib=size_gib, auto=auto_confirmed)
 
     print()
+    print('== Backing up anything already on the disk, before it gets wiped ==')
+    backup_dir = os.path.join(WORKDIR, 'usb_backup_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+    backed_up_to = partition.backup_existing_data(disk_id, backup_dir)
+    if backed_up_to:
+        print(f'Backed up existing data from {disk_id} to {backed_up_to}')
+    else:
+        print('Nothing worth backing up was found on this disk (blank, or nothing readable).')
+
+    print()
     print('== Partitioning ==')
     efi_part, target_part = partition.create_partitions(disk_id)
 
@@ -333,6 +347,8 @@ def main():
         print('  - Once macOS is fully installed and booted (not just Recovery),')
         print('    run cpufriend.py against the EFI partition to generate')
         print('    CPUFriendDataProvider.kext (make sure CPUFriend.kext is present first).')
+    if backed_up_to:
+        print(f'  - Whatever was on {disk_id} before is backed up at {backed_up_to}')
     print('=' * 70)
     print(f'Total time: {_format_duration(time.time() - start_time)}.')
     print(f'Working files ({_workdir_size_gib():.1f} GB) are kept in {WORKDIR} - the downloaded')
