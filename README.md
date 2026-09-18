@@ -63,6 +63,7 @@ src/                 the actual module source - see "What it does" below for wha
     macos_acpi.py           real ACPI tables straight from IOKit, on macOS
     macrecovery.py         fetches macOS Recovery from Apple
     partition.py           disk partitioning (the one destructive step)
+    restore_backup.py      restores a usb_backup_<timestamp>/ folder back onto a real destination
     write_basesystem.py    writes the Recovery image to the target partition
     install_efi.py         post-macOS-install: EFI onto the internal disk
     usb_map.py, cpufriend.py, imessage.py    other post-boot follow-up steps
@@ -371,6 +372,20 @@ to actually remove it):
 python3 imessage.py            # dry run
 python3 imessage.py --apply    # actually clean up
 ```
+
+If the disk you built this installer on had data backed up from it (see
+"Automation and safety" above), get it back with:
+
+```bash
+python3 restore_backup.py hackintosh_build/usb_backup_20260101_120000 /path/to/somewhere/safe
+```
+
+It's really just a folder of plain files - you can also browse and copy
+from it directly in Finder/Explorer/a file manager, using its own
+`MANIFEST.txt` to see what's in it. `restore_backup.py` is only a
+one-command convenience over doing that by hand, with the same
+disk-space check the rest of this toolkit uses, and it won't overwrite
+anything already at the destination.
 
 ## After it finishes
 

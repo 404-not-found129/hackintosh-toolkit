@@ -45,6 +45,7 @@ MODULES = [
     'hardware_report.py',
     'macrecovery.py',
     'partition.py',
+    'restore_backup.py',
     'write_basesystem.py',
     'macos_acpi.py',
     'opcore_simplify.py',
