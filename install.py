@@ -1667,11 +1667,24 @@ def mount_efi(efi_partition):
     osname = hw_detect.host_os()
 
     if osname == 'macos':
-        out = _run(['diskutil', 'mount', efi_partition]).stdout
-        # "Volume EFI on /dev/diskXsY mounted at /Volumes/EFI"
-        if ' at ' in out:
-            return out.strip().split(' at ')[-1]
-        return '/Volumes/EFI'
+        _run(['diskutil', 'mount', efi_partition])
+        # Ask diskutil directly for the real mount point rather than parsing
+        # `diskutil mount`'s own text output or assuming one - verified live
+        # that output doesn't actually contain a path at all on current
+        # diskutil ("Volume EFI on disk6s1 mounted", no "mounted at ..."
+        # clause), and a hardcoded "/Volumes/EFI" fallback is wrong whenever
+        # something else named "EFI" is already mounted: reproduced live,
+        # a second EFI-named volume mounts as "/Volumes/EFI 1", and the old
+        # code would have silently returned the *first* one's path instead -
+        # copying/reading the wrong disk entirely with no error at all.
+        import plistlib
+        info = plistlib.loads(_run(['diskutil', 'info', '-plist', efi_partition],
+                                    check=False, quiet=True).stdout.encode())
+        mount_point = info.get('MountPoint')
+        if not mount_point:
+            raise RuntimeError(f'{efi_partition} does not appear to be mounted after `diskutil mount` - '
+                                f'diskutil info reports no MountPoint.')
+        return mount_point
 
     if osname == 'linux':
         mount_point = '/mnt/hackintosh_efi'
@@ -3483,7 +3496,7 @@ def macos_version_from_darwin(darwin_version):
     if not darwin_version:
         return None
     major = int(str(darwin_version).split('.')[0])
-    return next((v for v in macrecovery.MACOS_VERSIONS if v['darwin'] == major), None)
+    return macrecovery.version_by_darwin(major)
 
 
 def choose_macos_version_fetched():

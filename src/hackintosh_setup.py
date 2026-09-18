@@ -106,7 +106,7 @@ def macos_version_from_darwin(darwin_version):
     if not darwin_version:
         return None
     major = int(str(darwin_version).split('.')[0])
-    return next((v for v in macrecovery.MACOS_VERSIONS if v['darwin'] == major), None)
+    return macrecovery.version_by_darwin(major)
 
 
 def choose_macos_version_fetched():
