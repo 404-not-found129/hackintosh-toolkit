@@ -111,8 +111,16 @@ def get_cpu_info():
 
 
 def _parse_ven_dev(text):
-    """Extract (vendor_id, device_id) 4-hex-digit pairs from PNPDeviceID/lspci-style text."""
-    m = re.search(r'(?:VEN_|:)([0-9A-Fa-f]{4}).*?(?:DEV_|:)([0-9A-Fa-f]{4})', text)
+    """Extract (vendor_id, device_id) 4-hex-digit pairs from a Windows PNPDeviceID/InstanceId
+    or lspci-style text. Matches PCI's "VEN_xxxx&DEV_yyyy" AND USB's "VID_xxxx&PID_yyyy" -
+    Microsoft's own two separate, invariant device-ID-string conventions (see "Device
+    Identification Strings" docs) - not just the PCI one. Confirmed live-shaped: this used to
+    only recognize VEN_/DEV_, so get_bluetooth_controllers()'s Windows branch (InstanceId from
+    `Get-PnpDevice -Class Bluetooth`) silently returned nothing for every USB-attached Bluetooth
+    adapter - the overwhelming majority of them - since a real one's InstanceId reads
+    "USB\\VID_xxxx&PID_yyyy\\..." with no "VEN_"/"DEV_" or bare ":" anywhere in it at all.
+    """
+    m = re.search(r'(?:VEN_|VID_|:)([0-9A-Fa-f]{4}).*?(?:DEV_|PID_|:)([0-9A-Fa-f]{4})', text)
     if m:
         return m.group(1).lower(), m.group(2).lower()
     return None, None
