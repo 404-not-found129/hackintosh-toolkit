@@ -1725,6 +1725,16 @@ def backup_existing_data(disk_id, backup_dir):
 
 def _backup_partition(mount_point, we_mounted_it, unmount_fn, label, backup_dir):
     dest = os.path.join(backup_dir, label)
+    if os.path.exists(dest):
+        # Two partitions on the same disk can genuinely share a label - not
+        # theoretical, see _find_macos_partitions()'s own docstring for a
+        # real case of two partitions both literally named "EFI" on one
+        # disk - so disambiguate instead of colliding with the first
+        # backup (copytree requires its destination not already exist).
+        suffix = 2
+        while os.path.exists(f'{dest}_{suffix}'):
+            suffix += 1
+        dest = f'{dest}_{suffix}'
     print(f'Checking {mount_point} ("{label}") for existing data to back up...')
     try:
         copied = _backup_one_volume(mount_point, dest, label)
