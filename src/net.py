@@ -68,7 +68,19 @@ def fetch_latest_release_zip(repo, workdir, name_must_contain=('RELEASE',), name
 
 def fetch_repo_source_zip(owner_repo, workdir, branch='master'):
     """Downloads a GitHub repo's source as a zip (no git required) and extracts it.
-    Returns the path to the extracted top-level folder."""
+    Returns the path to the extracted top-level folder.
+
+    workdir is a fixed path this toolkit reuses across separate runs (see
+    hackintosh_setup.py's WORKDIR) rather than a fresh one per run, so a
+    stale extract_dir from an earlier run can already be sitting there -
+    confirmed live, still present in this exact repo from earlier runs this
+    same session. zf.extractall() only adds/overwrites paths that exist in
+    the zip being extracted now; it never deletes a file that existed in an
+    older run's zip but was since renamed/removed upstream (this tool
+    fetches "main"/"master" fresh every time - a moving target, not a
+    pinned release). Wiping extract_dir first guarantees what ends up on
+    disk always matches exactly what's actually in the zip just downloaded,
+    not a merge of that with whatever an older run happened to leave there."""
     os.makedirs(workdir, exist_ok=True)
     url = f'https://github.com/{owner_repo}/archive/refs/heads/{branch}.zip'
     name = owner_repo.split('/')[-1]
@@ -76,6 +88,7 @@ def fetch_repo_source_zip(owner_repo, workdir, branch='master'):
     print(f'Downloading {owner_repo}@{branch} source...')
     download(url, zip_path)
     extract_dir = os.path.join(workdir, f'{name}-src')
+    shutil.rmtree(extract_dir, ignore_errors=True)
     with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(extract_dir)
     entries = os.listdir(extract_dir)
@@ -85,6 +98,9 @@ def fetch_repo_source_zip(owner_repo, workdir, branch='master'):
 
 
 def extract_zip(zip_path, into):
+    """See fetch_repo_source_zip()'s docstring for why `into` is wiped
+    first - same reused-workdir staleness risk applies here."""
+    shutil.rmtree(into, ignore_errors=True)
     with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(into)
     return into
