@@ -234,6 +234,20 @@ def _install_auto_answers(tool_dir, hardware_report_path, acpi_tables_dir, picke
         print('== Unrecognized OpCore-Simplify prompt - answer this one yourself ==')
         return real_input(prompt)
 
+    def reset_after_stuck():
+        """Called before retrying o.main() after an AutomationStuck - a
+        retried run re-shows the main menu from scratch, so menu_visits
+        must go back to 0 too (otherwise this driver miscounts which step
+        it's on and answers '6' - build - on the retry's first menu prompt,
+        instead of '1' - select hardware report again, since that flow was
+        interrupted mid-way and never actually finished the first time).
+        last_prompt/repeat_count also reset so the prompt that got stuck
+        gets a genuine fresh set of attempts instead of immediately raising
+        AutomationStuck again the moment it reappears, with no human asked."""
+        state['menu_visits'] = 0
+        state['last_prompt'] = None
+        state['repeat_count'] = 0
+
     oc_utils.Utils.request_input = auto_request_input
 
     entry = os.path.join(tool_dir, 'OpCore-Simplify.py')
@@ -255,7 +269,7 @@ def _install_auto_answers(tool_dir, hardware_report_path, acpi_tables_dir, picke
         return result
 
     o.select_macos_version = _capture_macos_version
-    return o
+    return o, reset_after_stuck
 
 
 def run_automated(tool_dir, hardware_report_path, acpi_tables_dir):
@@ -269,7 +283,7 @@ def run_automated(tool_dir, hardware_report_path, acpi_tables_dir):
         sys.path.insert(0, tool_dir)
 
     picked = {}
-    o = _install_auto_answers(tool_dir, hardware_report_path, acpi_tables_dir, picked)
+    o, reset_after_stuck = _install_auto_answers(tool_dir, hardware_report_path, acpi_tables_dir, picked)
 
     try:
         o.main()
@@ -278,14 +292,17 @@ def run_automated(tool_dir, hardware_report_path, acpi_tables_dir):
     except AutomationStuck as e:
         # main() aborted mid-flow, so its local state (hardware report,
         # version, kext selections) is gone - the only sane recovery is to
-        # start the menu over. The same auto_request_input closure keeps
-        # running, so the ordinary prompts before/after the stuck one are
-        # still answered automatically; only that one now goes to a real
-        # human the first time it's asked again, since repeat_count carries
-        # forward. If it's still stuck, this is a real upstream change this
-        # driver's prompt table needs updating for, not a transient glitch.
+        # start the menu over. reset_after_stuck() puts the auto_request_input
+        # closure's own state back to where it was before the first main()
+        # call too, so the retry answers '1' (select hardware report) again
+        # instead of miscounting its way straight to '6' (build), and the
+        # prompt that got stuck gets a genuine fresh set of attempts instead
+        # of immediately raising again with no human asked. If it's still
+        # stuck after that, this is a real upstream change this driver's
+        # prompt table needs updating for, not a transient glitch.
         print(f'\n{e}')
         print('Restarting OpenCore-Simplify\'s menu - the prompt above needs a real answer now.')
+        reset_after_stuck()
         try:
             o.main()
         except SystemExit:
