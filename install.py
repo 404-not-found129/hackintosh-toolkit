@@ -1351,6 +1351,15 @@ def _save_image(url, sess, filename, directory):
     print(f'Downloading {os.path.basename(path)} ...')
     response = _run_query(url, headers, raw=True)
     total = int(dict(response.headers).get('Content-Length', -1))
+    if total > 0:
+        free = shutil.disk_usage(directory).free
+        if free < total * 1.05:
+            raise SystemExit(
+                f'Not enough free space to download {os.path.basename(path)}: it is '
+                f'{total / 2**30:.1f} GB but only {free / 2**30:.1f} GB is free at {directory}. '
+                f'Free up space and try again - Apple already confirmed the exact size before any '
+                f'of it was written, so this fails now instead of partway through the download.'
+            )
     size = 0
     with open(path, 'wb') as fh:
         while True:
@@ -1404,13 +1413,40 @@ def _verify_image(dmgpath, cnkpath):
 
 
 def download_recovery(version, outdir):
-    """version: one entry from MACOS_VERSIONS. Returns path to the verified .dmg."""
+    """version: one entry from MACOS_VERSIONS. Returns path to the verified .dmg.
+
+    Names the saved files after the requested Darwin version (not the fixed
+    "BaseSystem.dmg"/"BaseSystem.chunklist" this used before) and reuses them
+    across runs if they're already there and still verify - outdir is a
+    fixed, across-run-reused path (hackintosh_setup.py's WORKDIR), and this
+    exact user's own workflow already involves re-running the installer
+    multiple times over several days while iterating on a build. A generic
+    releases image is immutable once Apple publishes it for a given version,
+    unlike OpCore-Simplify's own source (see net.py's fetch_repo_source_zip
+    docstring for why *that* one is wiped fresh every run instead) - so
+    caching this one is safe, and re-downloading a multi-hundred-MB-to-2GB+
+    image on every retry when nothing about the macOS version choice changed
+    is pure wasted time/bandwidth. Falls back to a fresh download whenever
+    a cached copy is missing or fails verification - never trusts a cached
+    file blindly.
+    """
+    cnkpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.chunklist')
+    dmgpath = os.path.join(outdir, f'BaseSystem-{version["darwin"]}.dmg')
+    if os.path.isfile(cnkpath) and os.path.isfile(dmgpath):
+        print(f'Found a previously-downloaded {version["name"]} image in {outdir} - verifying before reusing it...')
+        try:
+            _verify_image(dmgpath, cnkpath)
+            print('Still verifies OK - skipping re-download.')
+            return dmgpath
+        except Exception as e:
+            print(f'Cached copy failed verification ({e}) - downloading fresh instead.')
+
     print(f'Requesting {version["name"]} Internet Recovery image from Apple (board-id {version["board_id"]})...')
     session = _get_session()
     info = _get_image_info(session, version['board_id'], version['mlb'], version['os_type'])
     print(f'Apple offered product {info[INFO_PRODUCT]}')
-    cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], 'BaseSystem.chunklist', outdir)
-    dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], 'BaseSystem.dmg', outdir)
+    cnkpath = _save_image(info[INFO_SIGN_LINK], info[INFO_SIGN_SESS], f'BaseSystem-{version["darwin"]}.chunklist', outdir)
+    dmgpath = _save_image(info[INFO_IMAGE_LINK], info[INFO_IMAGE_SESS], f'BaseSystem-{version["darwin"]}.dmg', outdir)
     _verify_image(dmgpath, cnkpath)
     return dmgpath
 
@@ -3481,6 +3517,7 @@ step, the BIOS settings you still have to set by hand).
 import datetime
 import os
 import sys
+import time
 
 import hw_detect
 import macrecovery
@@ -3644,7 +3681,29 @@ def _read_smbios_model(efi_dest):
         return None
 
 
+def _format_duration(seconds):
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}h {minutes}m {secs}s'
+    if minutes:
+        return f'{minutes}m {secs}s'
+    return f'{secs}s'
+
+
+def _workdir_size_gib():
+    total = 0
+    for base, _dirs, files in os.walk(WORKDIR):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(base, name))
+            except OSError:
+                pass
+    return total / (1024 ** 3)
+
+
 def main():
+    start_time = time.time()
     log_path = start_logging()
     print(f'Logging this session to {log_path}')
 
@@ -3749,6 +3808,11 @@ def main():
         print('  - Once macOS is fully installed and booted (not just Recovery),')
         print('    run cpufriend.py against the EFI partition to generate')
         print('    CPUFriendDataProvider.kext (make sure CPUFriend.kext is present first).')
+    print('=' * 70)
+    print(f'Total time: {_format_duration(time.time() - start_time)}.')
+    print(f'Working files ({_workdir_size_gib():.1f} GB) are kept in {WORKDIR} - the downloaded')
+    print('macOS image there is reused (after re-verifying it) next time you pick the same')
+    print('version, so it\'s worth keeping; delete the whole folder any time to reclaim the space.')
     print('=' * 70)
 
 

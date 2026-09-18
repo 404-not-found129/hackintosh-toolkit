@@ -42,6 +42,7 @@ step, the BIOS settings you still have to set by hand).
 import datetime
 import os
 import sys
+import time
 
 import hw_detect
 import macrecovery
@@ -205,7 +206,29 @@ def _read_smbios_model(efi_dest):
         return None
 
 
+def _format_duration(seconds):
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f'{hours}h {minutes}m {secs}s'
+    if minutes:
+        return f'{minutes}m {secs}s'
+    return f'{secs}s'
+
+
+def _workdir_size_gib():
+    total = 0
+    for base, _dirs, files in os.walk(WORKDIR):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(base, name))
+            except OSError:
+                pass
+    return total / (1024 ** 3)
+
+
 def main():
+    start_time = time.time()
     log_path = start_logging()
     print(f'Logging this session to {log_path}')
 
@@ -310,6 +333,11 @@ def main():
         print('  - Once macOS is fully installed and booted (not just Recovery),')
         print('    run cpufriend.py against the EFI partition to generate')
         print('    CPUFriendDataProvider.kext (make sure CPUFriend.kext is present first).')
+    print('=' * 70)
+    print(f'Total time: {_format_duration(time.time() - start_time)}.')
+    print(f'Working files ({_workdir_size_gib():.1f} GB) are kept in {WORKDIR} - the downloaded')
+    print('macOS image there is reused (after re-verifying it) next time you pick the same')
+    print('version, so it\'s worth keeping; delete the whole folder any time to reclaim the space.')
     print('=' * 70)
 
 

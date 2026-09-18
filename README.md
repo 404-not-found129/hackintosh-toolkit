@@ -128,7 +128,11 @@ get committed - but avoiding it in the first place is simpler.)
    picked** - captured directly from OpCore-Simplify's own "Select macOS
    Version" menu, not asked a second time - straight from Apple's own
    Internet Recovery servers, same protocol a real Mac uses, nothing
-   mirrored or redistributed (`macrecovery.py`).
+   mirrored or redistributed. If a copy for that exact version is already
+   sitting in `hackintosh_build/` from an earlier run, it's re-verified
+   against Apple's own chunklist signature and reused instead of downloading
+   the same 0.5-2GB+ image again - falls back to a fresh download if that
+   verification fails for any reason (`macrecovery.py`).
 5. **Detects your USB/SD card and asks you to confirm it** - if exactly
    one is already connected, it's shown as the default (press Enter to
    take it); with several connected, or none yet (it'll wait for you to
@@ -228,6 +232,10 @@ python3 install.py --acpi-dir /path/to/your/aml/files
   - Windows: `choco install dmg2img dd`
 - Internet access (downloads from `osrecovery.apple.com`,
   `api.github.com`, and `github.com` release assets).
+- A few GB of free space wherever you run this from (`hackintosh_build/`
+  holds the downloaded macOS image, fetched tools, and ACPI dump) - checked
+  against Apple's own reported download size before writing anything, so
+  this fails with a clear message up front rather than partway through.
 - **macOS only, for the USB mapping step**: `pip install pyobjc` (usb_map.py
   offers to do this for you when it launches USBToolBox).
 - **Linux, for ACPI dumping**: `dmidecode` and `mokutil` if available (used
